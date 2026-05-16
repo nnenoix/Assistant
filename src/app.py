@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src import auth
+from src import auth, chats
 from src.agent import AgentSession
 from src.config import ALLOWLIST_PATH, PROJECT_ROOT
 from src.policy import Policy
@@ -25,6 +25,14 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 _session = AgentSession(policy=Policy.load(ALLOWLIST_PATH))
 
 _run_queues: dict[str, asyncio.Queue] = {}
+_chat_log: chats.ChatLog | None = None  # rolls over on server restart
+
+
+def _ensure_chat_log() -> chats.ChatLog:
+    global _chat_log
+    if _chat_log is None:
+        _chat_log = chats.ChatLog.start_new()
+    return _chat_log
 
 
 class ChatRequest(BaseModel):
@@ -42,12 +50,19 @@ async def index():
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
+    log = _ensure_chat_log()
+    log.append_user(req.message)
+
     run_id = str(uuid.uuid4())
     queue: asyncio.Queue = asyncio.Queue()
     _run_queues[run_id] = queue
 
     async def emit(event: dict):
         await queue.put(event)
+        try:
+            log.append_event(event)
+        except Exception:
+            pass  # persistence failures must not break the stream
 
     async def runner():
         try:
@@ -125,3 +140,20 @@ async def add_account_api(req: AddAccountRequest):
 @app.delete("/api/accounts/{alias}")
 async def remove_account_api(alias: str):
     return auth.remove_account(alias)
+
+
+# -------- Chat history --------
+
+@app.get("/api/chats")
+async def list_chats_api(q: str | None = None, limit: int = 30):
+    if q:
+        return {"chats": chats.search_chats(q, limit=limit)}
+    return {"chats": chats.list_chats(limit=limit)}
+
+
+@app.get("/api/chats/{chat_id}")
+async def read_chat_api(chat_id: str):
+    try:
+        return chats.read_chat(chat_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"chat {chat_id} not found")

@@ -10,7 +10,7 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src.tools import apps_script, drive, excel, local_fs, sheets
+from src.tools import apps_script, chats, drive, excel, local_fs, notes, sheets
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -235,6 +235,35 @@ TOOLS = [
         "Get spreadsheet metadata: title and list of sheets/tabs.",
         {"type": "object", "properties": {"spreadsheet_id": {"type": "string"}}, "required": ["spreadsheet_id"]},
     ),
+    _tool(
+        "sheets_summarize",
+        sheets.summarize,
+        "sheets.read",
+        "Structural summary of a spreadsheet in ONE call: title, every sheet's name + grid size + header row + first N data rows (default 5). Use this FIRST when exploring an unfamiliar spreadsheet — it's much cheaper than reading each sheet separately.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "sample_rows": {"type": "integer", "description": "How many data rows to include per sheet (default 5, max 50)."},
+            },
+            "required": ["spreadsheet_id"],
+        },
+    ),
+    _tool(
+        "sheets_find_in_spreadsheet",
+        sheets.find_in_spreadsheet,
+        "sheets.read",
+        "Search a substring across EVERY sheet in a spreadsheet. Returns each match with its sheet name, A1 cell address, row/col indices, and the cell value. One call replaces many sheets_read_range calls when you need to locate something.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "query": {"type": "string"},
+                "case_sensitive": {"type": "boolean", "description": "Default false."},
+            },
+            "required": ["spreadsheet_id", "query"],
+        },
+    ),
     # --- Apps Script ---
     _tool(
         "apps_script_clone",
@@ -347,6 +376,64 @@ TOOLS = [
             "properties": {"account": {"type": "string"}},
             "required": ["account"],
         },
+    ),
+    # --- Chat history (search your own past conversations) ---
+    _tool(
+        "chats_list_recent",
+        chats.list_recent,
+        "chats.read",
+        "List recent saved chat sessions, newest first. Each entry has id, title (taken from the first user message), started_at, message_count. Use to remind the user (or yourself) what was discussed recently.",
+        {"type": "object", "properties": {"limit": {"type": "integer", "description": "Default 30."}}},
+    ),
+    _tool(
+        "chats_read",
+        chats.read,
+        "chats.read",
+        "Read the full transcript of a specific past chat by id. The id format is a timestamp like '2026-05-16T14-30-00'.",
+        {"type": "object", "properties": {"chat_id": {"type": "string"}}, "required": ["chat_id"]},
+    ),
+    _tool(
+        "chats_search",
+        chats.search,
+        "chats.read",
+        "Substring search across ALL saved chats. Returns matches with short snippets so you can decide which chat to read in full. Use when the user references prior work ('что мы делали с таблицей X на прошлой неделе').",
+        {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]},
+    ),
+    # --- Notes (persistent agent memory across sessions) ---
+    _tool(
+        "notes_add",
+        notes.add,
+        "notes.write",
+        "Save a short note for future reference. Use for facts the user shares that you'll want later: IDs, preferences, recurring constants ('Лена 2026 НДС 5%', 'ID финального отчёта = 1AbC…'). Optional tag groups related notes. Always proactively save such facts.",
+        {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "tag": {"type": "string", "description": "Optional grouping tag like 'elena', 'taxes', 'ids'."},
+            },
+            "required": ["text"],
+        },
+    ),
+    _tool(
+        "notes_list",
+        notes.list_notes,
+        "notes.read",
+        "List all stored notes, oldest first. Use to refresh your memory at the start of a session if the user references things you should know.",
+        {"type": "object", "properties": {"limit": {"type": "integer", "description": "Default 50."}}},
+    ),
+    _tool(
+        "notes_search",
+        notes.search,
+        "notes.read",
+        "Find notes by substring across text and tag. Check this when the user asks about something they previously told you ('что я говорил про НДС?', 'какой был ID той презентации?').",
+        {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    ),
+    _tool(
+        "notes_remove",
+        notes.remove,
+        "notes.write",
+        "Delete a note by id. Use when the user explicitly asks to forget something.",
+        {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
     ),
 ]
 
