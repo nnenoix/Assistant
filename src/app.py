@@ -1,9 +1,7 @@
 import asyncio
 import json
 import uuid
-from pathlib import Path
 
-from anthropic import Anthropic
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +10,6 @@ from pydantic import BaseModel
 from src.agent import AgentSession
 from src.config import ALLOWLIST_PATH, PROJECT_ROOT
 from src.policy import Policy
-from src.tools.registry import BY_NAME
 
 
 app = FastAPI(title="Google Workspace Chat Agent")
@@ -21,11 +18,7 @@ STATIC_DIR = PROJECT_ROOT / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-_session = AgentSession(
-    client=Anthropic(),
-    policy=Policy.load(ALLOWLIST_PATH),
-    tools=BY_NAME,
-)
+_session = AgentSession(policy=Policy.load(ALLOWLIST_PATH))
 
 _run_queues: dict[str, asyncio.Queue] = {}
 

@@ -1,14 +1,14 @@
 # Google Workspace Chat Agent
 
-Local single-user chat that drives Claude to manage Google Drive, Sheets, Apps Script, and local Excel files. Built with the raw `anthropic` Python SDK and a hand-rolled tool-use loop.
+Local single-user chat that drives Claude to manage Google Drive, Sheets, Apps Script, and local Excel files. Built with [`claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python) — uses your `claude` CLI authentication (Pro/Max subscription), **no Anthropic API key required**.
 
 ## Prerequisites
 - Windows + PowerShell
 - Python 3.11+ (verified with 3.11.0)
 - [uv](https://github.com/astral-sh/uv) — `winget install --id=astral-sh.uv -e`
-- Node.js (for clasp): https://nodejs.org/
-- clasp: `npm install -g @google/clasp` then `clasp login`
-- Anthropic API key in `$env:ANTHROPIC_API_KEY`
+- Node.js (for `clasp` and the `claude` CLI): https://nodejs.org/
+- **Claude Code CLI** logged in: `npm install -g @anthropic-ai/claude-code` then `claude login` (Pro/Max subscription)
+- **clasp**: `npm install -g @google/clasp` then `clasp login` (separate Google OAuth, only needed for Apps Script)
 
 ## One-time Google setup
 The OAuth client is already configured (`client_secret_*.apps.googleusercontent.com.json`, project `claude-mcp-496508`).
@@ -60,7 +60,7 @@ Default scaffold grants `read` everywhere and read-only on `D:/Google work`. All
 ```powershell
 uv run pytest -v
 ```
-39 tests across 7 files: auth (3), policy (9), excel (5), drive_adapter (8), sheets_adapter (7), agent_loop (4), app (3).
+43 tests across 7 files: auth (3), policy (9), excel (5), drive_adapter (8), sheets_adapter (7), agent_loop (6: policy/approval glue, prefix-stripping, no SDK end-to-end), app (3).
 
 ## Project layout
 ```
@@ -68,7 +68,7 @@ src/
   config.py          path constants, OAuth scopes, default model
   auth.py            google OAuth credentials
   policy.py          allow-list policy gate
-  agent.py           anthropic SDK tool-use loop with approval flow
+  agent.py           ClaudeSDKClient wrapper with policy/approval bridge
   app.py             FastAPI server + SSE
   tools/
     drive.py         google drive adapter
@@ -76,14 +76,15 @@ src/
     apps_script.py   clasp subprocess wrapper (path-traversal-guarded)
     excel.py         openpyxl xlsx parser
     local_fs.py      local file ops
-    registry.py      tool name → fn / schema / policy_op registry (28 tools)
+    registry.py      28 tools wrapped as SDK @tool, exposed via in-process MCP server
 .data/               gitignored — token.json, allowlist.json, scripts/
 tests/               pytest suite
 ```
 
 ## Known wrinkles
+- **First run requires `claude login`** — uses your Pro/Max subscription via the `claude` CLI. The agent never reads `ANTHROPIC_API_KEY`.
 - **Apps Script `run`** requires the target script to be deployed as **API executable** (Deploy → New deployment → API executable) and clasp must be logged in. If you only need to edit code, `clone` + `push` work without deployment.
 - **Drive `delete` is permanent** (skips trash). The default allow-list requires approval for it.
-- **Token expiry**: if `token.json` was created with fewer scopes than now configured, delete it and re-run the first-run command.
-- **Conversation history** is in-memory per server run — restart wipes it.
-- **No streaming inside a turn (v1)**: the agent waits for the full Anthropic response before emitting events. Upgrade path: swap `messages.create` for `messages.stream` and emit `text_delta` events.
+- **Token expiry (Google OAuth)**: if `token.json` was created with fewer scopes than now configured, delete it and re-run the first-run command.
+- **Conversation context** is managed by the SDK session inside `AgentSession`; restart wipes it. The SDK supports `session_id`/`resume` for cross-process continuity — not wired up here.
+- **Tool surface**: Claude only sees our 28 tools (whitelisted via `allowed_tools`). Built-in `claude` CLI tools (Bash, Read, Write, etc.) are blocked — every tool call routes through `can_use_tool` → our Policy gate.

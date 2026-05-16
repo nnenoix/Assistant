@@ -1,5 +1,19 @@
-"""Single source of truth for tool name → callable, schema, policy op."""
+"""Single source of truth for tool name → callable, schema, policy op.
+
+Wraps each Python tool function as a claude-agent-sdk `@tool` and assembles them
+into an in-process SDK MCP server. The agent loop registers this server with
+ClaudeSDKClient and uses POLICY_OP_BY_TOOL to gate execution.
+"""
+import asyncio
+import json
+
+from claude_agent_sdk import create_sdk_mcp_server, tool
+
 from src.tools import apps_script, drive, excel, local_fs, sheets
+
+
+MCP_SERVER_NAME = "gworkagent"
+# Claude sees tools as: mcp__gworkagent__<tool_name>
 
 
 def _tool(name, fn, policy_op, description, input_schema):
@@ -256,4 +270,34 @@ TOOLS = [
 
 
 BY_NAME = {t["name"]: t for t in TOOLS}
-ANTHROPIC_SCHEMAS = [t["schema"] for t in TOOLS]
+POLICY_OP_BY_TOOL = {t["name"]: t["policy_op"] for t in TOOLS}
+
+
+def _wrap_for_sdk(spec):
+    """Decorate a sync tool fn as an async @tool that returns SDK-compatible output."""
+    name = spec["name"]
+    fn = spec["fn"]
+    description = spec["schema"]["description"]
+    input_schema = spec["schema"]["input_schema"]
+
+    @tool(name, description, input_schema)
+    async def wrapped(args):
+        try:
+            result = await asyncio.to_thread(fn, **args)
+            payload = json.dumps(result, default=str) if result is not None else "(no output)"
+            return {"content": [{"type": "text", "text": payload}]}
+        except Exception as e:
+            return {
+                "content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}],
+                "is_error": True,
+            }
+    return wrapped
+
+
+def build_sdk_mcp_server():
+    """Construct the in-process SDK MCP server with all 28 tools."""
+    return create_sdk_mcp_server(
+        name=MCP_SERVER_NAME,
+        version="1.0.0",
+        tools=[_wrap_for_sdk(t) for t in TOOLS],
+    )
