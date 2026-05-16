@@ -169,6 +169,32 @@ TOOLS = [
             "required": ["name_contains"],
         },
     ),
+    _tool(
+        "drive_name_patterns",
+        drive.name_patterns,
+        "drive.read",
+        "STRUCTURAL ANALYSIS of file names matching a query — no file contents read. Returns recurring 2-3 letter uppercase codes (likely brand/project codes like SA, IN, RM), year tokens, doc-type words (ОПиУ, ДДС, Баланс), and frequent other words. **Call this FIRST** when the user asks 'what brands/projects/clients does X have', 'из чего состоит X', 'какие направления у X'. The answer is in the file NAMES — every code/word in the recurring buckets is part of the answer. List them ALL.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    ),
+    _tool(
+        "drive_name_patterns_everywhere",
+        drive.name_patterns_everywhere,
+        "drive.read",
+        "drive_name_patterns aggregated across EVERY configured account. Use for structural questions when you don't know which account the entity belongs to. Reports per-account file counts and aggregates name analysis.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    ),
     # --- Sheets ---
     _tool(
         "sheets_read_range",

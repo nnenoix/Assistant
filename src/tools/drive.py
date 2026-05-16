@@ -157,3 +157,103 @@ def search_everywhere(name_contains: str, mime_type: str | None = None) -> dict:
     from src import auth as _auth  # local import to avoid circular dependency at module load
     accounts = _auth.list_accounts() or [DEFAULT_ACCOUNT]
     return {acct: search(name_contains, mime_type=mime_type, account=acct) for acct in accounts}
+
+
+def _analyze_names(files: list[dict], query: str) -> dict:
+    """Tokenize file names and return structural signals — codes, years, doc
+    types, frequent words. Pure data analysis, no API calls."""
+    import re
+    from collections import Counter
+
+    if not files:
+        return {
+            "total_files": 0, "files": [],
+            "recurring_codes_2_3_upper": {}, "year_tokens": {},
+            "doc_type_candidates": {}, "common_other_words": {},
+        }
+
+    tokens: list[str] = []
+    for f in files:
+        # Split on whitespace and punctuation; keep words and digit runs
+        tokens.extend(re.findall(r"[A-Za-zА-Яа-яёЁ]+|\d+", f["name"]))
+
+    cnt = Counter(tokens)
+    # Filter out tokens from the query itself so they don't dominate output
+    query_words = {w.lower() for w in re.findall(r"\w+", query)}
+
+    short_codes = {
+        t: c for t, c in cnt.items()
+        if 2 <= len(t) <= 3 and t.isalpha() and t.isupper() and c >= 2
+    }
+    year_tokens = {
+        t: c for t, c in cnt.items()
+        if t.isdigit() and len(t) == 4 and 2000 < int(t) < 2100
+    }
+    # Words ≥4 chars appearing in 2+ files — likely doc types, brand names, projects
+    common_words = sorted(
+        ((t, c) for t, c in cnt.items()
+         if len(t) >= 4 and c >= 2 and t.lower() not in query_words and not t.isdigit()),
+        key=lambda kv: kv[1], reverse=True,
+    )
+
+    # Heuristic: doc-type tokens are typical Russian/English financial doc names
+    doc_type_words = {"ОПиУ", "ДДС", "Баланс", "Маржа", "Отчет", "Отчёт", "P&L", "PnL", "Финансы", "Активы"}
+    doc_types = {t: c for t, c in common_words if t in doc_type_words}
+    other_words = dict([(t, c) for t, c in common_words if t not in doc_type_words][:30])
+
+    return {
+        "total_files": len(files),
+        "files": [
+            {"name": f["name"], "id": f["id"], "modifiedTime": f.get("modifiedTime"),
+             "owner": (f.get("owners") or [{}])[0].get("emailAddress")}
+            for f in files
+        ],
+        "recurring_codes_2_3_upper": short_codes,
+        "year_tokens": year_tokens,
+        "doc_type_candidates": doc_types,
+        "common_other_words": other_words,
+        "hint": (
+            "recurring_codes_2_3_upper and common_other_words are the categorical "
+            "signals: brand codes, project names, departments. List EVERY entry "
+            "from those buckets in your answer when the user asks 'what does X consist of'."
+        ),
+    }
+
+
+def name_patterns(query: str, account: str = DEFAULT_ACCOUNT) -> dict:
+    """Run drive_search and return STRUCTURAL ANALYSIS of the file names —
+    recurring 2-3 letter uppercase codes (likely brand/project codes), year
+    tokens, doc-type words, and frequent other words. Use this BEFORE reading
+    any file when the user asks 'what brands/projects/clients does X have',
+    'what does X consist of', 'из чего состоит X'. The categorical answer
+    is in the file NAMES, this tool surfaces it without reading contents.
+    """
+    files = search(query, account=account)
+    out = _analyze_names(files, query)
+    out["query"] = query
+    out["account"] = account
+    return out
+
+
+def name_patterns_everywhere(query: str) -> dict:
+    """name_patterns aggregated across every configured account."""
+    from src import auth as _auth
+    accounts = _auth.list_accounts() or [DEFAULT_ACCOUNT]
+    all_files: list[dict] = []
+    seen_ids: set[str] = set()
+    per_account: dict[str, int] = {}
+    for acct in accounts:
+        files = search(query, account=acct)
+        per_account[acct] = len(files)
+        for f in files:
+            if f["id"] in seen_ids:
+                continue
+            seen_ids.add(f["id"])
+            f = dict(f)
+            f["_account"] = acct
+            all_files.append(f)
+    out = _analyze_names(all_files, query)
+    out["query"] = query
+    out["accounts_searched"] = accounts
+    out["per_account_counts"] = per_account
+    return out
