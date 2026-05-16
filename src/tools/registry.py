@@ -624,6 +624,30 @@ BY_NAME = {t["name"]: t for t in TOOLS}
 POLICY_OP_BY_TOOL = {t["name"]: t["policy_op"] for t in TOOLS}
 
 
+# Max chars sent back to the model per tool call. ~12k chars ≈ 3-4k tokens.
+# Tool outputs above this get cut with an instruction nudging the agent to
+# narrow its next read. Keeps token bills sane on huge spreadsheets / Drive
+# listings without losing the small-tool ergonomics.
+MAX_TOOL_PAYLOAD = 12000
+
+
+def _truncation_hint(name: str) -> str:
+    """Per-tool guidance on how to read less. Saves the agent a guessing round."""
+    if name.startswith("sheets_") and name != "sheets_summarize":
+        return "Use sheets_summarize first to see structure, then read narrower ranges (e.g. 'Sheet1!A1:E50'), or sheets_find_in_spreadsheet for targeted lookups."
+    if name.startswith("drive_"):
+        return "Pass a smaller page_size, or filter with drive_search + mime_type."
+    if name == "excel_parse":
+        return "Call again with sheet=<name> to get one sheet at a time."
+    if name.startswith("chats_") and name != "chats_search_semantic":
+        return "Prefer chats_search_semantic with a focused query (returns top-k snippets, not full transcripts)."
+    if name.startswith("notes_") and name != "notes_search_semantic":
+        return "Prefer notes_search_semantic with a focused query."
+    if name.startswith("gmail_") and name != "gmail_get_message":
+        return "Narrow the Gmail query (add subject:/from:/newer_than:7d), reduce max_results."
+    return "Re-call this tool with narrower input."
+
+
 def _wrap_for_sdk(spec):
     """Decorate a sync tool fn as an async @tool that returns SDK-compatible output."""
     name = spec["name"]
@@ -635,7 +659,17 @@ def _wrap_for_sdk(spec):
     async def wrapped(args):
         try:
             result = await asyncio.to_thread(fn, **args)
-            payload = json.dumps(result, default=str) if result is not None else "(no output)"
+            if result is None:
+                return {"content": [{"type": "text", "text": "(no output)"}]}
+            payload = json.dumps(result, default=str, ensure_ascii=False)
+            if len(payload) > MAX_TOOL_PAYLOAD:
+                cut = MAX_TOOL_PAYLOAD - 400
+                hint = _truncation_hint(name)
+                payload = (
+                    payload[:cut]
+                    + f"\n\n…[TRUNCATED at {cut:,}/{len(payload):,} chars to save tokens. "
+                    f"{hint}]"
+                )
             return {"content": [{"type": "text", "text": payload}]}
         except Exception as e:
             return {

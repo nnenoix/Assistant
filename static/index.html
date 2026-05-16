@@ -157,6 +157,28 @@
   .header-link.icon-only { padding: 6px 8px; }
   .header-link.icon-only svg { width: 14px; height: 14px; }
 
+  /* model select — sits in the header next to the theme toggle */
+  .model-select {
+    appearance: none;
+    -webkit-appearance: none;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    color: var(--text-2);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 26px 6px 10px;
+    cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(135deg, var(--text-3) 50%, transparent 50%);
+    background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+    background-size: 5px 5px;
+    background-repeat: no-repeat;
+    transition: color .15s, border-color .15s, background-color .15s;
+  }
+  .model-select:hover { color: var(--text); border-color: var(--border-2); background-color: var(--surface-2); }
+  .model-select:disabled { opacity: 0.5; cursor: not-allowed; }
+  .model-select option { background: var(--surface); color: var(--text); }
+
   /* log */
   .log-wrap {
     overflow-y: auto;
@@ -954,7 +976,8 @@ function ApprovalModal({ req, onResolve }) {
 }
 
 /* ── header ──────────────────────────────────────────────────────── */
-function Header({ accounts, theme, onToggleTheme }) {
+function Header({ accounts, theme, onToggleTheme, model, models, onSelectModel, modelBusy }) {
+  const currentLabel = models.find(m => m.alias === model)?.label || model;
   return html`
     <header class="header">
       <div class="brand">
@@ -967,6 +990,16 @@ function Header({ accounts, theme, onToggleTheme }) {
             ? html`<span class="chip muted"><span class="chip-dot"></span>нет аккаунтов</span>`
             : accounts.map(a => html`<span class="chip" key=${a}><span class="chip-dot"></span>${a}</span>`)}
         </div>
+        <select class="model-select"
+          value=${model || ""}
+          disabled=${modelBusy || !models.length}
+          onChange=${e => onSelectModel(e.target.value)}
+          title=${"Текущая модель: " + currentLabel}
+          aria-label="Модель">
+          ${models.map(m => html`
+            <option key=${m.alias} value=${m.alias}>${m.label}</option>
+          `)}
+        </select>
         <button class="header-link icon-only" onClick=${onToggleTheme}
           title=${theme === "light" ? "Переключить на тёмную тему" : "Переключить на светлую тему"}
           aria-label="Тема">
@@ -1080,6 +1113,9 @@ function App() {
   const [approvalQueue, setApprovalQueue] = useState([]); // FIFO of approval_required events
   const [connError, setConnError] = useState(null);
   const [accounts, setAccounts] = useState([]);
+  const [model, setModel] = useState(null);
+  const [models, setModels] = useState([]);
+  const [modelBusy, setModelBusy] = useState(false);
   const [theme, setTheme] = useState(() => {
     try {
       const saved = localStorage.getItem("theme");
@@ -1111,6 +1147,40 @@ function App() {
       .then(j => setAccounts(j.accounts || []))
       .catch(() => {});
   }, []);
+
+  /* ── load model selection on mount ──────────────────────────── */
+  useEffect(() => {
+    fetch("/api/model")
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        if (!j) return;
+        setModel(j.current);
+        setModels(j.models || []);
+      })
+      .catch(() => {});
+  }, []);
+
+  const onSelectModel = useCallback(async (alias) => {
+    if (!alias || alias === model) return;
+    setModelBusy(true);
+    const prev = model;
+    setModel(alias);  // optimistic
+    try {
+      const r = await fetch("/api/model", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ alias }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      setModel(j.current);
+    } catch (e) {
+      setModel(prev);
+      setConnError(`Не удалось переключить модель: ${e.message}`);
+    } finally {
+      setModelBusy(false);
+    }
+  }, [model]);
 
   /* ── auto-scroll with manual override ───────────────────────── */
   useEffect(() => {
@@ -1297,7 +1367,15 @@ function App() {
 
   return html`
     <div class="app">
-      <${Header} accounts=${accounts} theme=${theme} onToggleTheme=${toggleTheme} />
+      <${Header}
+        accounts=${accounts}
+        theme=${theme}
+        onToggleTheme=${toggleTheme}
+        model=${model}
+        models=${models}
+        onSelectModel=${onSelectModel}
+        modelBusy=${modelBusy}
+      />
       <div class="log-wrap" ref=${logRef}>
         ${!hasMessages ? html`<${EmptyState} />` : html`
           <div class="log">

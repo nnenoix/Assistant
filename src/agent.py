@@ -56,12 +56,34 @@ Rules:
 4. For Excel-to-Sheets pipelines: parse with excel_parse, then write via sheets_write_range or sheets_append_rows.
 5. Report what you did with file IDs, links, and which account it was done on so the user can verify.
 6. If a tool returns an error, read the error message and adapt — do not silently ignore.
-7. When the user references something specific (a particular file, a person, a number), check `notes_search` and `chats_search` BEFORE asking — you may already have the answer in memory.
+7. When the user references something specific (a particular file, a person, a number), check `notes_search_semantic` and `chats_search_semantic` BEFORE asking — you may already have the answer in memory.
 8. When the user shares a durable fact (IDs they care about, business rules, partner emails, account-specific constants), save it via `notes_add` without being asked.
+9. **Be parsimonious with tokens.** Tool outputs over ~12k chars are auto-truncated with a hint on how to narrow the read. Prefer summarize-then-zoom: `sheets_summarize` before raw reads, `drive_search` with mime_type filter, semantic search with a focused query, `excel_parse` with `sheet=<name>` for one sheet at a time. Never read an entire spreadsheet just to "see what's there".
 """
 
 
 Emit = Callable[[dict], Awaitable[None]]
+
+
+# Friendly aliases the UI shows. Maps to actual model IDs the CLI/SDK understands.
+KNOWN_MODELS: dict[str, dict] = {
+    "haiku": {
+        "id": "claude-haiku-4-5",
+        "label": "Haiku 4.5",
+        "blurb": "самая быстрая и дешёвая, для рутинных tool-вызовов",
+    },
+    "sonnet": {
+        "id": "claude-sonnet-4-6",
+        "label": "Sonnet 4.6",
+        "blurb": "сбалансированная, дефолт",
+    },
+    "opus": {
+        "id": "claude-opus-4-7",
+        "label": "Opus 4.7",
+        "blurb": "самая умная, для сложной аналитики и кода",
+    },
+}
+DEFAULT_MODEL_ALIAS = "sonnet"
 
 
 def _strip_mcp_prefix(tool_name: str) -> str:
@@ -73,12 +95,29 @@ def _strip_mcp_prefix(tool_name: str) -> str:
 class AgentSession:
     """Persistent agent session backed by claude-agent-sdk (uses `claude` CLI auth, no API key)."""
 
-    def __init__(self, policy: Policy):
+    def __init__(self, policy: Policy, model_alias: str = DEFAULT_MODEL_ALIAS):
         self.policy = policy
         self._pending_approvals: dict[str, asyncio.Future] = {}
         self._client: ClaudeSDKClient | None = None
         self._current_emit: Emit | None = None
         self._mcp_server = build_sdk_mcp_server()
+        self._model_alias = model_alias if model_alias in KNOWN_MODELS else DEFAULT_MODEL_ALIAS
+
+    @property
+    def model_alias(self) -> str:
+        return self._model_alias
+
+    async def set_model(self, alias: str) -> None:
+        """Switch the model. Closes the current SDK session — next /chat
+        opens a fresh one with the new model. Conversation history doesn't
+        persist across the switch (SDK-side context resets).
+        """
+        if alias not in KNOWN_MODELS:
+            raise ValueError(f"unknown model alias: {alias}")
+        if alias == self._model_alias:
+            return
+        self._model_alias = alias
+        await self.close()
 
     def resolve_approval(self, request_id: str, approved: bool) -> None:
         fut = self._pending_approvals.pop(request_id, None)
@@ -135,6 +174,7 @@ class AgentSession:
                 system_prompt=SYSTEM_PROMPT,
                 permission_mode="default",
                 setting_sources=[],
+                model=KNOWN_MODELS[self._model_alias]["id"],
             )
             client = ClaudeSDKClient(options=options)
             await client.__aenter__()

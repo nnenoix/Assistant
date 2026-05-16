@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src import auth, chats
-from src.agent import AgentSession
+from src.agent import AgentSession, KNOWN_MODELS
 from src.config import ALLOWLIST_PATH, PROJECT_ROOT
 from src.policy import Policy
 
@@ -140,6 +140,32 @@ async def add_account_api(req: AddAccountRequest):
 @app.delete("/api/accounts/{alias}")
 async def remove_account_api(alias: str):
     return auth.remove_account(alias)
+
+
+# -------- Model selection --------
+
+class SetModelRequest(BaseModel):
+    alias: str
+
+
+@app.get("/api/model")
+async def get_model_api():
+    return {
+        "current": _session.model_alias,
+        "models": [
+            {"alias": a, **info}
+            for a, info in KNOWN_MODELS.items()
+        ],
+    }
+
+
+@app.post("/api/model")
+async def set_model_api(req: SetModelRequest):
+    try:
+        await _session.set_model(req.alias)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"current": _session.model_alias}
 
 
 # -------- Chat history --------
