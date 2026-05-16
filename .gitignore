@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets — never commit
+client_secret_*.json
+.data/
+
+# Editor
+.vscode/
+.idea/
