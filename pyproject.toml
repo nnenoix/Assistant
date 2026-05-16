@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.9.0",
     "python-multipart>=0.0.20",
     "claude-agent-sdk>=0.2.82",
+    "pywebview>=6.2.1",
 ]
 
 [dependency-groups]

@@ -145,8 +145,29 @@ TOOLS = [
         "drive_search",
         drive.search,
         "drive.read",
-        "Search files by name substring across all of My Drive.",
-        {"type": "object", "properties": {"name_contains": {"type": "string"}}, "required": ["name_contains"]},
+        "Search Drive files by name across everything the account can see (owned + shared with the user). Optional mime_type narrows by type — use friendly shortcuts: 'spreadsheet' (Google Sheets), 'doc' (Google Docs), 'folder', 'presentation', 'pdf', 'script' (Apps Script), 'form'. Example: search 'idealnight' with mime_type='spreadsheet' returns only Sheets named *idealnight*.",
+        {
+            "type": "object",
+            "properties": {
+                "name_contains": {"type": "string"},
+                "mime_type": {"type": "string", "description": "Optional filter. Shortcuts: spreadsheet, doc, folder, presentation, pdf, script, form. Or pass a full mime string like 'application/vnd.google-apps.spreadsheet'."},
+            },
+            "required": ["name_contains"],
+        },
+    ),
+    _tool(
+        "drive_search_everywhere",
+        drive.search_everywhere,
+        "drive.read",
+        "Run drive_search across EVERY configured Google account and aggregate. Use when the user says 'find X' without specifying which account, or 'check all my drives'. Returns {account_alias: [files]} so the agent can group results by source. Combines well with mime_type filtering.",
+        {
+            "type": "object",
+            "properties": {
+                "name_contains": {"type": "string"},
+                "mime_type": {"type": "string", "description": "Optional. Same shortcuts as drive_search."},
+            },
+            "required": ["name_contains"],
+        },
     ),
     # --- Sheets ---
     _tool(

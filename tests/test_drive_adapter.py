@@ -95,7 +95,7 @@ def test_search(fake_service):
     drive.search("foo bar")
     fake_service.files().list.assert_called_with(
         q="name contains 'foo bar' and trashed = false",
-        fields="files(id,name,mimeType,modifiedTime,parents)",
+        fields="files(id,name,mimeType,modifiedTime,parents,owners(emailAddress))",
         pageSize=50,
     )
 
@@ -105,6 +105,23 @@ def test_search_escapes_quotes(fake_service):
     drive.search("user's file")
     fake_service.files().list.assert_called_with(
         q="name contains 'user\\'s file' and trashed = false",
-        fields="files(id,name,mimeType,modifiedTime,parents)",
+        fields="files(id,name,mimeType,modifiedTime,parents,owners(emailAddress))",
         pageSize=50,
     )
+
+
+def test_search_with_mime_shortcut(fake_service):
+    fake_service.files().list().execute.return_value = {"files": []}
+    drive.search("idealnight", mime_type="spreadsheet")
+    fake_service.files().list.assert_called_with(
+        q="name contains 'idealnight' and trashed = false and mimeType = 'application/vnd.google-apps.spreadsheet'",
+        fields="files(id,name,mimeType,modifiedTime,parents,owners(emailAddress))",
+        pageSize=50,
+    )
+
+
+def test_search_with_full_mime_string(fake_service):
+    fake_service.files().list().execute.return_value = {"files": []}
+    drive.search("plan", mime_type="application/pdf")
+    args = fake_service.files().list.call_args.kwargs
+    assert "mimeType = 'application/pdf'" in args["q"]

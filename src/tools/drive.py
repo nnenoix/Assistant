@@ -9,6 +9,21 @@ from src.auth import get_credentials
 FOLDER_MIME = "application/vnd.google-apps.folder"
 DEFAULT_ACCOUNT = "main"
 
+# Short aliases the agent / user can use for mime_type in drive.search instead
+# of the full Google mime string.
+MIME_SHORTCUTS = {
+    "spreadsheet": "application/vnd.google-apps.spreadsheet",
+    "sheet": "application/vnd.google-apps.spreadsheet",
+    "doc": "application/vnd.google-apps.document",
+    "document": "application/vnd.google-apps.document",
+    "folder": "application/vnd.google-apps.folder",
+    "presentation": "application/vnd.google-apps.presentation",
+    "slides": "application/vnd.google-apps.presentation",
+    "form": "application/vnd.google-apps.form",
+    "script": "application/vnd.google-apps.script",
+    "pdf": "application/pdf",
+}
+
 
 @lru_cache(maxsize=8)
 def _service(account: str = DEFAULT_ACCOUNT):
@@ -116,11 +131,29 @@ def copy(file_id: str, new_name: str | None = None, parent_id: str | None = None
     ).execute()
 
 
-def search(name_contains: str, account: str = DEFAULT_ACCOUNT) -> list[dict]:
+def search(name_contains: str, mime_type: str | None = None, account: str = DEFAULT_ACCOUNT) -> list[dict]:
+    """Search files by name across all files the account can see (own + shared).
+    Optional `mime_type` filters by type — accepts both shortcuts ('spreadsheet',
+    'doc', 'folder', 'pdf', etc.) and full Google mime strings.
+    """
     safe = name_contains.replace("\\", "\\\\").replace("'", "\\'")
+    q_parts = [f"name contains '{safe}'", "trashed = false"]
+    if mime_type:
+        mt = MIME_SHORTCUTS.get(mime_type.lower(), mime_type)
+        q_parts.append(f"mimeType = '{mt}'")
     resp = _service(account).files().list(
-        q=f"name contains '{safe}' and trashed = false",
-        fields="files(id,name,mimeType,modifiedTime,parents)",
+        q=" and ".join(q_parts),
+        fields="files(id,name,mimeType,modifiedTime,parents,owners(emailAddress))",
         pageSize=50,
     ).execute()
     return resp.get("files", [])
+
+
+def search_everywhere(name_contains: str, mime_type: str | None = None) -> dict:
+    """Run the same name search across EVERY configured account and aggregate.
+    Returns {account_alias: [files]}. Useful when the user asks 'find X anywhere'
+    without specifying which Google account it might live in.
+    """
+    from src import auth as _auth  # local import to avoid circular dependency at module load
+    accounts = _auth.list_accounts() or [DEFAULT_ACCOUNT]
+    return {acct: search(name_contains, mime_type=mime_type, account=acct) for acct in accounts}
