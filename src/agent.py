@@ -155,12 +155,26 @@ class AgentSession:
             await self._current_emit({"type": "tool_denied", "name": unprefixed})
         return PermissionResultDeny(message="User denied this action")
 
-    # Built-in Claude Code CLI tools we never want exposed to this agent.
-    # The agent should only operate via the 28 mcp__gworkagent__* tools.
+    # Tools we never want exposed to this agent. Two groups:
+    #  1. Claude Code CLI built-ins — we only want our own MCP tools.
+    #  2. "Hallucinated" MCP servers from other Anthropic products (Claude.ai's
+    #     Drive integration etc.) that the model knows about from training but
+    #     aren't in OUR server. Without these, the model wastes a tool call
+    #     attempting one before our can_use_tool returns "not registered".
     _BLOCKED_BUILTINS = [
+        # CLI built-ins
         "Bash", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep",
         "NotebookEdit", "Task", "TodoWrite", "WebFetch", "WebSearch",
         "ToolSearch", "BashOutput", "KillBash", "ExitPlanMode",
+        # Foreign MCP servers the model may try to address (claude.ai products)
+        "mcp__claude_ai_Google_Drive__list_recent_files",
+        "mcp__claude_ai_Google_Drive__search_files",
+        "mcp__claude_ai_Google_Drive__read_file_content",
+        "mcp__claude_ai_Google_Drive__get_file_metadata",
+        "mcp__claude_ai_Google_Drive__download_file_content",
+        "mcp__claude_ai_Google_Drive__copy_file",
+        "mcp__claude_ai_Google_Drive__create_file",
+        "mcp__claude_ai_Google_Drive__get_file_permissions",
     ]
 
     async def _ensure_client(self) -> ClaudeSDKClient:
