@@ -1,0 +1,1339 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Workspace Agent</title>
+<link rel="preconnect" href="https://esm.sh" />
+<style>
+  :root, :root[data-theme="dark"] {
+    --bg:            #0e0f12;
+    --bg-2:          #14161b;
+    --surface:       #15181f;
+    --surface-2:     #1a1e26;
+    --border:        #232832;
+    --border-2:      #2c323e;
+    --text:          #e6e8ee;
+    --text-2:        #a3a8b4;
+    --text-3:        #6b7280;
+    --primary:       #2563eb;
+    --primary-soft:  rgba(37, 99, 235, 0.16);
+    --primary-text:  #93b4ff;
+    --user-bubble-bg:#2563eb;
+    --user-bubble-tx:#f3f6ff;
+    --danger:        #b91c1c;
+    --danger-soft:   rgba(185, 28, 28, 0.18);
+    --danger-text:   #fca5a5;
+    --warn-soft:     rgba(202, 138, 4, 0.16);
+    --warn-text:     #fcd34d;
+    --ok-soft:       rgba(22, 163, 74, 0.16);
+    --ok-text:       #86efac;
+    --header-bg:     rgba(14,15,18,0.85);
+    --scrollbar:     #262b35;
+    --scrollbar-hov: #313846;
+    --modal-backdrop: rgba(6, 7, 10, 0.72);
+    --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", "Menlo", "Consolas", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif;
+    --radius: 10px;
+    --radius-sm: 6px;
+    --shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 8px 24px rgba(0,0,0,0.32);
+  }
+  :root[data-theme="light"] {
+    --bg:            #ffffff;
+    --bg-2:          #f7f8fa;
+    --surface:       #ffffff;
+    --surface-2:     #f4f6f9;
+    --border:        #e6e8ec;
+    --border-2:      #d3d7de;
+    --text:          #0e1116;
+    --text-2:        #4b5563;
+    --text-3:        #8b92a0;
+    --primary:       #2563eb;
+    --primary-soft:  rgba(37, 99, 235, 0.10);
+    --primary-text:  #1d4fd8;
+    --user-bubble-bg:#2563eb;
+    --user-bubble-tx:#ffffff;
+    --danger:        #b91c1c;
+    --danger-soft:   rgba(185, 28, 28, 0.08);
+    --danger-text:   #b91c1c;
+    --warn-soft:     rgba(202, 138, 4, 0.10);
+    --warn-text:     #92400e;
+    --ok-soft:       rgba(22, 163, 74, 0.10);
+    --ok-text:       #15803d;
+    --header-bg:     rgba(255,255,255,0.85);
+    --scrollbar:     #d6dae0;
+    --scrollbar-hov: #b4bac4;
+    --modal-backdrop: rgba(15, 23, 42, 0.40);
+    --shadow: 0 1px 0 rgba(255,255,255,0.6) inset, 0 8px 24px rgba(15,23,42,0.10);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--primary-soft); }
+
+  /* scrollbars */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hov); }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* layout */
+  .app {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: 100vh;
+    width: 100%;
+  }
+
+  /* header */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 24px;
+    height: 52px;
+    border-bottom: 1px solid var(--border);
+    background: var(--header-bg);
+    backdrop-filter: blur(10px);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 600; letter-spacing: -0.01em;
+  }
+  .brand-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.18);
+  }
+  .brand-title { font-size: 13.5px; }
+  .brand-sub { font-size: 11.5px; color: var(--text-3); margin-left: 6px; }
+
+  .header-right { display: flex; align-items: center; gap: 10px; }
+  .accounts-chips {
+    display: flex; gap: 6px; align-items: center;
+    max-width: 50vw; overflow: hidden;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 11.5px;
+    color: var(--text-2);
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .chip .chip-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #4ade80;
+  }
+  .chip.muted { color: var(--text-3); }
+  .chip.muted .chip-dot { background: var(--text-3); }
+  .header-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text-2);
+    text-decoration: none;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .header-link:hover { color: var(--text); border-color: var(--border-2); background: var(--surface-2); }
+  button.header-link { font-family: var(--sans); cursor: pointer; font-size: 12.5px; }
+  .header-link.icon-only { padding: 6px 8px; }
+  .header-link.icon-only svg { width: 14px; height: 14px; }
+
+  /* log */
+  .log-wrap {
+    overflow-y: auto;
+    overflow-x: hidden;
+    scroll-behavior: smooth;
+  }
+  .log {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 28px 24px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  /* messages */
+  .turn-user {
+    display: flex; justify-content: flex-end;
+  }
+  .bubble-user {
+    max-width: 78%;
+    background: var(--user-bubble-bg);
+    color: var(--user-bubble-tx);
+    padding: 9px 14px;
+    border-radius: 14px 14px 4px 14px;
+    font-size: 14px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset;
+  }
+
+  .turn-asst {
+    display: flex; flex-direction: column;
+    gap: 10px;
+    max-width: 100%;
+  }
+
+  .bubble-asst {
+    background: transparent;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.62;
+    padding: 2px 0;
+  }
+  /* markdown defaults */
+  .bubble-asst > *:first-child { margin-top: 0; }
+  .bubble-asst > *:last-child  { margin-bottom: 0; }
+  .bubble-asst p { margin: 0 0 10px; }
+  .bubble-asst h1, .bubble-asst h2, .bubble-asst h3 {
+    margin: 16px 0 8px; font-weight: 600; letter-spacing: -0.01em;
+  }
+  .bubble-asst h1 { font-size: 18px; }
+  .bubble-asst h2 { font-size: 16px; }
+  .bubble-asst h3 { font-size: 14.5px; color: var(--text); }
+  .bubble-asst ul, .bubble-asst ol { margin: 4px 0 10px; padding-left: 22px; }
+  .bubble-asst li { margin: 3px 0; }
+  .bubble-asst a { color: var(--primary-text); text-decoration: none; border-bottom: 1px solid rgba(147,180,255,0.3); }
+  .bubble-asst a:hover { border-bottom-color: var(--primary-text); }
+  .bubble-asst code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .bubble-asst pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 6px 0 12px;
+  }
+  .bubble-asst pre code { background: none; border: none; padding: 0; font-size: 12.5px; }
+  .bubble-asst table { border-collapse: collapse; margin: 8px 0 14px; font-size: 13px; display: block; overflow-x: auto; }
+  .bubble-asst th, .bubble-asst td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .bubble-asst th { background: var(--surface); font-weight: 600; color: var(--text); }
+  .bubble-asst blockquote {
+    margin: 8px 0; padding: 4px 12px;
+    border-left: 2px solid var(--border-2);
+    color: var(--text-2);
+  }
+  .bubble-asst hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+
+  /* tool card */
+  .tool {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: var(--radius);
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+  .tool.err { border-color: rgba(185,28,28,0.5); }
+  .tool-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    background: var(--surface);
+    cursor: pointer;
+    user-select: none;
+    transition: background .12s;
+  }
+  .tool-head:hover { background: var(--surface-2); }
+  .tool-icon {
+    width: 22px; height: 22px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 5px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--text-2);
+    flex: 0 0 auto;
+  }
+  .tool-icon svg { width: 13px; height: 13px; }
+  .tool.err .tool-icon { color: var(--danger-text); border-color: rgba(185,28,28,0.4); background: var(--danger-soft); }
+  .tool-name {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .tool-args-preview {
+    color: var(--text-3);
+    margin-left: 4px;
+    flex: 1 1 auto;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0;
+  }
+  .tool-account {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 7px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--text-2);
+    flex: 0 0 auto;
+  }
+  .tool-account .chip-dot { width: 5px; height: 5px; border-radius: 50%; background: #4ade80; }
+  .tool-account.default { color: var(--text-3); }
+  .tool-account.default .chip-dot { background: var(--text-3); }
+
+  /* copy button — hover-revealed on assistant bubbles and tool results */
+  .copy-host { position: relative; }
+  .copy-btn {
+    position: absolute;
+    top: 6px; right: 6px;
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 7px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-2);
+    border-radius: 6px;
+    font-family: var(--sans);
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .12s, color .12s, border-color .12s, background .12s;
+    z-index: 2;
+  }
+  .copy-host:hover .copy-btn { opacity: 1; }
+  .copy-btn:hover { color: var(--text); border-color: var(--border-2); background: var(--surface); }
+  .copy-btn.copied { color: var(--ok-text); border-color: rgba(22,163,74,0.35); background: var(--ok-soft); opacity: 1; }
+  .copy-btn svg { width: 12px; height: 12px; }
+  .bubble-wrap { padding-right: 4px; }
+  .tool-status {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-family: var(--sans);
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    flex: 0 0 auto;
+  }
+  .tool-status.pending { color: var(--text-3); background: var(--bg-2); border: 1px solid var(--border); }
+  .tool-status.ok { color: var(--ok-text); background: var(--ok-soft); border: 1px solid rgba(22,163,74,0.25); }
+  .tool-status.err { color: var(--danger-text); background: var(--danger-soft); border: 1px solid rgba(185,28,28,0.3); }
+  .tool-chev {
+    color: var(--text-3); transition: transform .15s; flex: 0 0 auto;
+  }
+  .tool-chev svg { width: 14px; height: 14px; display: block; }
+  .tool.open .tool-chev { transform: rotate(90deg); }
+
+  .tool-body {
+    border-top: 1px solid var(--border);
+    background: var(--bg-2);
+  }
+  .tool-section {
+    padding: 10px 12px;
+  }
+  .tool-section + .tool-section { border-top: 1px solid var(--border); }
+  .tool-section-label {
+    font-family: var(--sans);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-3);
+    margin-bottom: 6px;
+  }
+  .tool-section pre {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 280px;
+    overflow: auto;
+  }
+  .tool-section.err pre { color: var(--danger-text); }
+
+  /* denied badge */
+  .denied {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px;
+    background: var(--danger-soft);
+    color: var(--danger-text);
+    border: 1px solid rgba(185,28,28,0.3);
+    border-radius: 999px;
+    font-size: 12px;
+    font-family: var(--mono);
+    align-self: flex-start;
+  }
+  .denied .strike { text-decoration: line-through; }
+
+  /* fatal banner */
+  .fatal {
+    border: 1px solid rgba(185,28,28,0.45);
+    background: var(--danger-soft);
+    color: var(--danger-text);
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .fatal svg { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 2px; }
+
+  /* thinking indicator */
+  .thinking {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--text-3);
+    font-size: 12.5px;
+    padding: 4px 0;
+  }
+  .dots { display: inline-flex; gap: 3px; }
+  .dots span {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--text-3);
+    animation: blink 1.2s infinite ease-in-out both;
+  }
+  .dots span:nth-child(2) { animation-delay: 0.15s; }
+  .dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes blink {
+    0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+    40% { opacity: 1; transform: translateY(-2px); }
+  }
+
+  /* empty state */
+  .empty {
+    margin: auto;
+    max-width: 520px;
+    padding: 56px 24px;
+    text-align: center;
+    color: var(--text-2);
+  }
+  .empty-mark {
+    width: 44px; height: 44px;
+    margin: 0 auto 18px;
+    border-radius: 12px;
+    background: linear-gradient(180deg, var(--surface-2), var(--surface));
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--primary-text);
+  }
+  .empty-mark svg { width: 22px; height: 22px; }
+  .empty h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+  .empty p.lead {
+    font-size: 13px;
+    color: var(--text-2);
+    margin: 0 0 22px;
+  }
+  .empty-caps {
+    display: grid;
+    gap: 8px;
+    text-align: left;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .empty-cap {
+    display: flex; gap: 10px; align-items: flex-start;
+    font-size: 13px; color: var(--text-2);
+  }
+  .empty-cap-icon {
+    color: var(--text-3);
+    width: 16px; height: 16px;
+    flex: 0 0 auto;
+    margin-top: 2px;
+  }
+  .empty-cap-icon svg { width: 14px; height: 14px; }
+  .empty-hint {
+    margin-top: 16px;
+    font-size: 12px;
+    color: var(--text-3);
+  }
+
+  /* input */
+  .composer-wrap {
+    border-top: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(14,15,18,0) 0%, var(--bg) 24px);
+  }
+  .composer {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 16px 24px 22px;
+  }
+  .composer-inner {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 8px 8px 8px 14px;
+    transition: border-color .15s, background .15s;
+  }
+  .composer-inner:focus-within {
+    border-color: rgba(37,99,235,0.5);
+    background: var(--surface-2);
+  }
+  .composer-inner.disabled {
+    opacity: 0.55;
+    pointer-events: none;
+  }
+  .composer textarea {
+    flex: 1 1 auto;
+    background: transparent;
+    border: 0;
+    outline: 0;
+    resize: none;
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.55;
+    padding: 8px 0;
+    max-height: 168px; /* ~6 rows */
+    min-height: 24px;
+  }
+  .composer textarea::placeholder { color: var(--text-3); }
+  .send-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px;
+    background: var(--primary);
+    border: 0;
+    border-radius: 8px;
+    color: white;
+    cursor: pointer;
+    transition: background .12s, transform .12s;
+    flex: 0 0 auto;
+  }
+  .send-btn:hover:not(:disabled) { background: #1d4fd8; }
+  .send-btn:active:not(:disabled) { transform: scale(0.96); }
+  .send-btn:disabled { background: var(--surface-2); color: var(--text-3); cursor: not-allowed; border: 1px solid var(--border); }
+  .send-btn svg { width: 16px; height: 16px; }
+
+  .composer-meta {
+    margin-top: 8px;
+    display: flex; justify-content: space-between;
+    color: var(--text-3);
+    font-size: 11.5px;
+  }
+  .kbd {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--text-2);
+  }
+
+  /* approval modal */
+  .modal-backdrop {
+    position: fixed; inset: 0;
+    background: var(--modal-backdrop);
+    backdrop-filter: blur(4px);
+    z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+    animation: fadeIn .12s ease-out;
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .modal {
+    width: 100%;
+    max-width: 540px;
+    background: var(--surface);
+    border: 1px solid var(--border-2);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    animation: popIn .14s ease-out;
+  }
+  @keyframes popIn { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
+  .modal-head {
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-eyebrow {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11.5px;
+    color: var(--warn-text);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+  }
+  .modal-eyebrow svg { width: 13px; height: 13px; }
+  .modal h2 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    word-break: break-all;
+  }
+  .modal-policy {
+    display: inline-flex;
+    align-items: center;
+    margin-top: 8px;
+    padding: 3px 9px;
+    background: var(--warn-soft);
+    color: var(--warn-text);
+    border: 1px solid rgba(202,138,4,0.3);
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+  }
+  .modal-body { padding: 16px 20px 18px; }
+  .modal-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
+    margin-bottom: 6px;
+  }
+  .modal pre {
+    margin: 0;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--text);
+    max-height: 240px;
+    overflow: auto;
+    line-height: 1.55;
+  }
+  .modal-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 20px 18px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background .12s, border-color .12s, color .12s;
+    font-family: var(--sans);
+  }
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-2);
+    border-color: var(--border);
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--border-2); background: var(--surface-2); }
+  .btn-danger {
+    background: var(--danger);
+    color: white;
+  }
+  .btn-danger:hover { background: #a51919; }
+  .btn-primary {
+    background: var(--primary);
+    color: white;
+  }
+  .btn-primary:hover { background: #1d4fd8; }
+  .btn[disabled] { opacity: 0.6; cursor: wait; }
+
+  /* connection error banner */
+  .conn-err {
+    margin: 12px auto;
+    max-width: 760px;
+    border: 1px solid rgba(185,28,28,0.45);
+    background: var(--danger-soft);
+    color: var(--danger-text);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px;
+  }
+  .conn-err svg { width: 16px; height: 16px; flex: 0 0 auto; }
+  .conn-err button {
+    margin-left: auto;
+    background: transparent;
+    color: var(--danger-text);
+    border: 1px solid rgba(252,165,165,0.4);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .conn-err button:hover { background: rgba(252,165,165,0.1); }
+
+  /* responsive */
+  @media (max-width: 720px) {
+    .header { padding: 0 16px; }
+    .log { padding: 20px 14px 32px; }
+    .composer { padding: 12px 14px 16px; }
+    .accounts-chips { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="module">
+import { h, render, Fragment } from "https://esm.sh/preact@10.22.0";
+import { useState, useEffect, useRef, useCallback, useMemo } from "https://esm.sh/preact@10.22.0/hooks";
+import htm from "https://esm.sh/htm@3.1.1";
+import { marked } from "https://esm.sh/marked@12.0.2";
+import {
+  HardDrive, Sheet, Code2, FileSpreadsheet, Folder, KeyRound,
+  ChevronRight, TriangleAlert, Send, ShieldCheck, Sparkles, RefreshCw,
+  Users, Copy, Check, Box, Sun, Moon,
+} from "https://esm.sh/lucide-preact@0.475.0?deps=preact@10.22.0";
+
+const html = htm.bind(h);
+
+/* ── markdown config ─────────────────────────────────────────────── */
+marked.setOptions({
+  gfm: true,
+  breaks: true,
+  headerIds: false,
+  mangle: false,
+});
+
+/* ── icon wrapper (lucide-preact via CDN) ────────────────────────── */
+const ICONS = {
+  drive: HardDrive,
+  sheet: Sheet,
+  code: Code2,
+  spreadsheet: FileSpreadsheet,
+  folder: Folder,
+  key: KeyRound,
+  chevron: ChevronRight,
+  alert: TriangleAlert,
+  send: Send,
+  shield: ShieldCheck,
+  sparkle: Sparkles,
+  refresh: RefreshCw,
+  user: Users,
+  copy: Copy,
+  check: Check,
+  box: Box,
+  sun: Sun,
+  moon: Moon,
+};
+const Icon = ({ name, size = 14, ...rest }) => {
+  const Comp = ICONS[name] || ICONS.box;
+  return h(Comp, { size, ...rest });
+};
+
+/* ── tool → icon group ───────────────────────────────────────────── */
+function toolIcon(name) {
+  if (!name) return "box";
+  if (name.startsWith("drive_")) return "drive";
+  if (name.startsWith("sheets_")) return "sheet";
+  if (name.startsWith("apps_script_")) return "code";
+  if (name.startsWith("excel_")) return "spreadsheet";
+  if (name.startsWith("local_")) return "folder";
+  if (name.startsWith("auth_")) return "key";
+  return "box";
+}
+
+/* ── short inline preview of tool input args ─────────────────────── */
+function argPreview(input) {
+  if (!input || typeof input !== "object") return "";
+  const parts = [];
+  for (const [k, v] of Object.entries(input)) {
+    let val;
+    if (v === null || v === undefined) val = String(v);
+    else if (typeof v === "string") val = v.length > 28 ? JSON.stringify(v.slice(0, 28) + "…") : JSON.stringify(v);
+    else if (typeof v === "number" || typeof v === "boolean") val = String(v);
+    else if (Array.isArray(v)) val = `[${v.length}]`;
+    else val = "{…}";
+    parts.push(`${k}=${val}`);
+    if (parts.join(", ").length > 80) break;
+  }
+  return parts.join(", ");
+}
+
+/* ── copy button ─────────────────────────────────────────────────── */
+function CopyButton({ getText, title = "Скопировать" }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async (e) => {
+    e.stopPropagation();
+    const text = typeof getText === "function" ? getText() : getText;
+    try {
+      await navigator.clipboard.writeText(text || "");
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text || "";
+      ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch {}
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1400);
+  };
+  return html`
+    <button class=${"copy-btn" + (copied ? " copied" : "")} onClick=${onClick} title=${title}>
+      <${Icon} name=${copied ? "check" : "copy"} size=${12} />
+      ${copied ? "Скопировано" : "Копировать"}
+    </button>
+  `;
+}
+
+/* ── tool card ───────────────────────────────────────────────────── */
+function ToolCard({ tool }) {
+  const [open, setOpen] = useState(false);
+  const status = tool.error
+    ? html`<span class="tool-status err">ошибка</span>`
+    : tool.denied
+      ? html`<span class="tool-status err">отклонено</span>`
+      : tool.result !== undefined
+        ? html`<span class="tool-status ok">готово</span>`
+        : html`<span class="tool-status pending">выполняется…</span>`;
+
+  const rawAcct = tool.input && tool.input.account;
+  const acct = rawAcct || "main";
+  const isDefaultAcct = !rawAcct;
+
+  return html`
+    <div class=${"tool" + (tool.error ? " err" : "") + (open ? " open" : "")}>
+      <div class="tool-head" onClick=${() => setOpen(o => !o)}>
+        <span class="tool-icon">
+          <${Icon} name=${toolIcon(tool.name)} size=${13} />
+        </span>
+        <span class="tool-name">${tool.name}</span>
+        <span class="tool-args-preview">${argPreview(tool.input)}</span>
+        <span class=${"tool-account" + (isDefaultAcct ? " default" : "")}
+              title=${isDefaultAcct ? "Google аккаунт (по умолчанию)" : "Google аккаунт"}>
+          <span class="chip-dot"></span>${acct}
+        </span>
+        ${status}
+        <span class="tool-chev"><${Icon} name="chevron" size=${14} /></span>
+      </div>
+      ${open && html`
+        <div class="tool-body">
+          <div class="tool-section copy-host">
+            <div class="tool-section-label">Параметры</div>
+            <pre>${JSON.stringify(tool.input ?? {}, null, 2)}</pre>
+            <${CopyButton} getText=${() => JSON.stringify(tool.input ?? {}, null, 2)} />
+          </div>
+          ${(tool.result !== undefined || tool.error) && html`
+            <div class=${"tool-section copy-host" + (tool.error ? " err" : "")}>
+              <div class="tool-section-label">${tool.error ? "Ошибка" : "Результат (превью)"}</div>
+              <pre>${tool.error || tool.result || "—"}</pre>
+              <${CopyButton} getText=${() => tool.error || tool.result || ""} />
+            </div>
+          `}
+        </div>
+      `}
+    </div>
+  `;
+}
+
+/* ── markdown safe-ish render ────────────────────────────────────── */
+function Markdown({ text }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current) ref.current.innerHTML = marked.parse(text || "");
+  }, [text]);
+  return html`
+    <div class="copy-host bubble-wrap">
+      <div class="bubble-asst" ref=${ref}></div>
+      <${CopyButton} getText=${() => text || ""} />
+    </div>
+  `;
+}
+
+/* ── denied / fatal ──────────────────────────────────────────────── */
+function DeniedBadge({ name }) {
+  return html`<span class="denied">denied: <span class="strike">${name}</span></span>`;
+}
+function FatalBlock({ msg }) {
+  return html`
+    <div class="fatal">
+      <${Icon} name="alert" />
+      <div>
+        <div style="font-weight:600;margin-bottom:2px;">Произошла фатальная ошибка</div>
+        <div style="font-family:var(--mono);font-size:12.5px;word-break:break-all;">${msg}</div>
+      </div>
+    </div>
+  `;
+}
+
+/* ── empty state ─────────────────────────────────────────────────── */
+function EmptyState() {
+  const caps = [
+    { icon: "drive",       text: "показывать файлы в Drive (свои и расшаренные)" },
+    { icon: "sheet",       text: "читать и редактировать Google Sheets" },
+    { icon: "spreadsheet", text: "парсить Excel и заливать данные в Sheets" },
+    { icon: "code",        text: "управлять Apps Script проектами" },
+    { icon: "user",        text: "работать с несколькими Google-аккаунтами одновременно" },
+  ];
+  return html`
+    <div class="empty">
+      <div class="empty-mark"><${Icon} name="sparkle" /></div>
+      <h1>Workspace Agent</h1>
+      <p class="lead">Опишите задачу — агент решит её через инструменты Drive, Sheets и Apps Script.</p>
+      <div class="empty-caps">
+        ${caps.map(c => html`
+          <div class="empty-cap" key=${c.icon}>
+            <span class="empty-cap-icon"><${Icon} name=${c.icon} /></span>
+            <span>${c.text}</span>
+          </div>
+        `)}
+      </div>
+      <p class="empty-hint">Опасные действия требуют подтверждения.</p>
+    </div>
+  `;
+}
+
+/* ── approval modal ──────────────────────────────────────────────── */
+function ApprovalModal({ req, onResolve }) {
+  const [busy, setBusy] = useState(false);
+  if (!req) return null;
+
+  const decide = async (approved) => {
+    setBusy(true);
+    try {
+      await fetch(`/approve/${req.request_id}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ approved }),
+      });
+    } catch (e) {
+      console.error("approve failed", e);
+    } finally {
+      onResolve(req.request_id, approved);
+    }
+  };
+
+  return html`
+    <div class="modal-backdrop">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div class="modal-eyebrow">
+            <${Icon} name="shield" />
+            Требуется подтверждение
+          </div>
+          <h2>${req.name}</h2>
+          ${req.policy_op && html`<div class="modal-policy">${req.policy_op}</div>`}
+        </div>
+        <div class="modal-body">
+          <div class="modal-label">Параметры вызова</div>
+          <pre>${JSON.stringify(req.input ?? {}, null, 2)}</pre>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-danger" disabled=${busy} onClick=${() => decide(false)}>
+            Отклонить
+          </button>
+          <button class="btn btn-primary" disabled=${busy} onClick=${() => decide(true)}>
+            Подтвердить
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/* ── header ──────────────────────────────────────────────────────── */
+function Header({ accounts, theme, onToggleTheme }) {
+  return html`
+    <header class="header">
+      <div class="brand">
+        <div class="brand-dot"></div>
+        <div class="brand-title">Workspace Agent<span class="brand-sub">локально · 127.0.0.1</span></div>
+      </div>
+      <div class="header-right">
+        <div class="accounts-chips">
+          ${accounts.length === 0
+            ? html`<span class="chip muted"><span class="chip-dot"></span>нет аккаунтов</span>`
+            : accounts.map(a => html`<span class="chip" key=${a}><span class="chip-dot"></span>${a}</span>`)}
+        </div>
+        <button class="header-link icon-only" onClick=${onToggleTheme}
+          title=${theme === "light" ? "Переключить на тёмную тему" : "Переключить на светлую тему"}
+          aria-label="Тема">
+          <${Icon} name=${theme === "light" ? "moon" : "sun"} />
+        </button>
+        <a class="header-link" href="/accounts" target="_blank" rel="noopener">
+          <${Icon} name="user" /> Аккаунты
+        </a>
+      </div>
+    </header>
+  `;
+}
+
+/* ── composer ────────────────────────────────────────────────────── */
+function Composer({ disabled, onSend }) {
+  const [value, setValue] = useState("");
+  const taRef = useRef(null);
+
+  const autoSize = () => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "24px";
+    el.style.height = Math.min(el.scrollHeight, 168) + "px";
+  };
+
+  useEffect(() => { autoSize(); }, [value]);
+  useEffect(() => { if (!disabled) taRef.current?.focus(); }, [disabled]);
+
+  const submit = () => {
+    const trimmed = value.trim();
+    if (!trimmed || disabled) return;
+    onSend(trimmed);
+    setValue("");
+  };
+
+  const onKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
+
+  return html`
+    <div class="composer-wrap">
+      <div class="composer">
+        <div class=${"composer-inner" + (disabled ? " disabled" : "")}>
+          <textarea
+            ref=${taRef}
+            rows="1"
+            placeholder="Что нужно сделать? Например: «покажи мои последние 5 файлов»"
+            value=${value}
+            onInput=${e => setValue(e.target.value)}
+            onKeyDown=${onKey}
+            disabled=${disabled}
+          ></textarea>
+          <button class="send-btn" disabled=${disabled || !value.trim()} onClick=${submit} aria-label="Отправить">
+            <${Icon} name="send" />
+          </button>
+        </div>
+        <div class="composer-meta">
+          <span>${disabled ? "Агент работает…" : "Готов к запросу"}</span>
+          <span><span class="kbd">Enter</span> отправить · <span class="kbd">Shift</span>+<span class="kbd">Enter</span> новая строка</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/* ── render one assistant event ──────────────────────────────────── */
+function AssistantEvent({ ev }) {
+  if (ev.kind === "text")     return html`<${Markdown} text=${ev.text} />`;
+  if (ev.kind === "tool")     return html`<${ToolCard} tool=${ev} />`;
+  if (ev.kind === "denied")   return html`<${DeniedBadge} name=${ev.name} />`;
+  if (ev.kind === "fatal")    return html`<${FatalBlock} msg=${ev.error} />`;
+  return null;
+}
+
+/* ── one turn ────────────────────────────────────────────────────── */
+function Turn({ turn, isLast, isStreaming, awaitingFirstReply }) {
+  if (turn.role === "user") {
+    return html`
+      <div class="turn-user">
+        <div class="bubble-user">${turn.text}</div>
+      </div>
+    `;
+  }
+  const showThinking =
+    isLast && isStreaming && (
+      turn.events.length === 0 ||
+      (awaitingFirstReply && turn.events.every(e => e.kind !== "text"))
+    );
+
+  return html`
+    <div class="turn-asst">
+      ${turn.events.map((ev, i) => html`<${AssistantEvent} ev=${ev} key=${ev.id || i} />`)}
+      ${showThinking && html`
+        <div class="thinking">
+          <span class="dots"><span></span><span></span><span></span></span>
+          ${turn.events.length === 0 ? "Думаю…" : "Анализирую результат…"}
+        </div>
+      `}
+    </div>
+  `;
+}
+
+/* ── main app ────────────────────────────────────────────────────── */
+function App() {
+  // turns: [{role:'user', text}, {role:'assistant', events:[]}]
+  const [turns, setTurns] = useState([]);
+  const [streaming, setStreaming] = useState(false);
+  const [approvalQueue, setApprovalQueue] = useState([]); // FIFO of approval_required events
+  const [connError, setConnError] = useState(null);
+  const [accounts, setAccounts] = useState([]);
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem("theme");
+      if (saved === "light" || saved === "dark") return saved;
+    } catch {}
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) return "light";
+    return "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    try { localStorage.setItem("theme", theme); } catch {}
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme(t => t === "light" ? "dark" : "light");
+  }, []);
+
+  const logRef = useRef(null);
+  const eventSrcRef = useRef(null);
+  const autoScrollRef = useRef(true);
+  const turnsRef = useRef(turns);
+  useEffect(() => { turnsRef.current = turns; }, [turns]);
+
+  /* ── load accounts on mount ─────────────────────────────────── */
+  useEffect(() => {
+    fetch("/api/accounts")
+      .then(r => r.ok ? r.json() : { accounts: [] })
+      .then(j => setAccounts(j.accounts || []))
+      .catch(() => {});
+  }, []);
+
+  /* ── auto-scroll with manual override ───────────────────────── */
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      autoScrollRef.current = distFromBottom < 60;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el) return;
+    if (autoScrollRef.current) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "instant" in el ? "instant" : "auto" });
+    }
+  }, [turns, approvalQueue]);
+
+  /* ── mutate last assistant turn helpers ─────────────────────── */
+  const updateLastAsst = useCallback((mutator) => {
+    setTurns(prev => {
+      const next = prev.slice();
+      for (let i = next.length - 1; i >= 0; i--) {
+        if (next[i].role === "assistant") {
+          next[i] = { ...next[i], events: mutator(next[i].events) };
+          break;
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  /* ── SSE event handler ──────────────────────────────────────── */
+  const onSSE = useCallback((raw) => {
+    let ev;
+    try { ev = JSON.parse(raw); } catch { return; }
+
+    switch (ev.type) {
+      case "text": {
+        updateLastAsst(events => [...events, { kind: "text", text: ev.text, id: cryptoId() }]);
+        break;
+      }
+      case "tool_call": {
+        updateLastAsst(events => [...events, {
+          kind: "tool",
+          id: ev.tool_use_id,
+          tool_use_id: ev.tool_use_id,
+          name: ev.name,
+          input: ev.input,
+          result: undefined,
+          error: undefined,
+          denied: false,
+        }]);
+        break;
+      }
+      case "tool_result": {
+        updateLastAsst(events => events.map(e =>
+          e.kind === "tool" && e.tool_use_id === ev.tool_use_id
+            ? { ...e, result: ev.result_preview }
+            : e
+        ));
+        break;
+      }
+      case "tool_error": {
+        updateLastAsst(events => events.map(e =>
+          e.kind === "tool" && e.tool_use_id === ev.tool_use_id
+            ? { ...e, error: ev.result_preview }
+            : e
+        ));
+        break;
+      }
+      case "approval_required": {
+        setApprovalQueue(q => [...q, ev]);
+        break;
+      }
+      case "tool_denied": {
+        updateLastAsst(events => {
+          // mark most recent unresolved tool with matching name as denied,
+          // or append a denied badge if no matching tool yet
+          const idx = [...events].reverse().findIndex(e =>
+            e.kind === "tool" && e.name === ev.name && !e.result && !e.error && !e.denied
+          );
+          if (idx >= 0) {
+            const realIdx = events.length - 1 - idx;
+            const next = events.slice();
+            next[realIdx] = { ...next[realIdx], denied: true, error: "Действие отклонено пользователем" };
+            return [...next, { kind: "denied", name: ev.name, id: cryptoId() }];
+          }
+          return [...events, { kind: "denied", name: ev.name, id: cryptoId() }];
+        });
+        break;
+      }
+      case "fatal_error": {
+        updateLastAsst(events => [...events, { kind: "fatal", error: ev.error, id: cryptoId() }]);
+        break;
+      }
+      case "done": {
+        closeStream();
+        break;
+      }
+      default:
+        console.warn("unknown sse event", ev);
+    }
+  }, [updateLastAsst]);
+
+  const closeStream = useCallback(() => {
+    if (eventSrcRef.current) {
+      eventSrcRef.current.close();
+      eventSrcRef.current = null;
+    }
+    setStreaming(false);
+  }, []);
+
+  /* ── kick off a turn ────────────────────────────────────────── */
+  const sendMessage = useCallback(async (text) => {
+    setConnError(null);
+    // append user + empty assistant turn
+    setTurns(prev => [
+      ...prev,
+      { role: "user", text },
+      { role: "assistant", events: [] },
+    ]);
+    setStreaming(true);
+
+    let runId;
+    try {
+      const r = await fetch("/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!r.ok) throw new Error(`POST /chat → ${r.status}`);
+      const j = await r.json();
+      runId = j.run_id;
+      if (!runId) throw new Error("no run_id in response");
+    } catch (e) {
+      setStreaming(false);
+      setConnError(`Не удалось отправить запрос: ${e.message}`);
+      updateLastAsst(events => [...events, { kind: "fatal", error: e.message, id: cryptoId() }]);
+      return;
+    }
+
+    // open SSE
+    try {
+      const es = new EventSource(`/stream/${runId}`);
+      eventSrcRef.current = es;
+      es.onmessage = (m) => onSSE(m.data);
+      es.onerror = () => {
+        // browser will auto-retry; but if connection truly dropped before `done`,
+        // surface it. We tolerate brief reconnects silently — only show after
+        // the connection has been in error state for 1s.
+        setTimeout(() => {
+          if (eventSrcRef.current === es && es.readyState === EventSource.CLOSED) {
+            setConnError("SSE-соединение разорвано. Перезагрузите страницу.");
+            closeStream();
+          }
+        }, 1000);
+      };
+    } catch (e) {
+      setStreaming(false);
+      setConnError(`Не удалось открыть поток: ${e.message}`);
+    }
+  }, [onSSE, updateLastAsst, closeStream]);
+
+  /* ── resolve an approval (pop from FIFO) ────────────────────── */
+  const onApprovalResolve = useCallback((requestId, approved) => {
+    setApprovalQueue(q => q.filter(x => x.request_id !== requestId));
+  }, []);
+
+  /* ── derive state for UI ────────────────────────────────────── */
+  const hasMessages = turns.length > 0;
+  const currentApproval = approvalQueue[0] || null;
+  const inputDisabled = streaming || !!currentApproval;
+
+  const lastAsstIdx = useMemo(() => {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (turns[i].role === "assistant") return i;
+    }
+    return -1;
+  }, [turns]);
+
+  return html`
+    <div class="app">
+      <${Header} accounts=${accounts} theme=${theme} onToggleTheme=${toggleTheme} />
+      <div class="log-wrap" ref=${logRef}>
+        ${!hasMessages ? html`<${EmptyState} />` : html`
+          <div class="log">
+            ${connError && html`
+              <div class="conn-err">
+                <${Icon} name="alert" />
+                <span>${connError}</span>
+                <button onClick=${() => location.reload()}>
+                  <${Icon} name="refresh" /> Перезагрузить
+                </button>
+              </div>
+            `}
+            ${turns.map((t, i) => html`
+              <${Turn}
+                key=${i}
+                turn=${t}
+                isLast=${i === lastAsstIdx}
+                isStreaming=${streaming && i === lastAsstIdx}
+                awaitingFirstReply=${streaming}
+              />
+            `)}
+          </div>
+        `}
+      </div>
+      <${Composer} disabled=${inputDisabled} onSend=${sendMessage} />
+      <${ApprovalModal} req=${currentApproval} onResolve=${onApprovalResolve} />
+    </div>
+  `;
+}
+
+function cryptoId() {
+  if (window.crypto?.randomUUID) return crypto.randomUUID();
+  return "id-" + Math.random().toString(36).slice(2);
+}
+
+render(h(App), document.getElementById("root"));
+</script>
+</body>
+</html>
