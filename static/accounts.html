@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Google аккаунты</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; background: #0e0f12; color: #e5e7eb; min-height: 100vh; }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 24px; }
+  h1 { margin: 0 0 8px; font-size: 24px; }
+  p.sub { color: #9ca3af; margin: 0 0 32px; }
+  .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .card .alias { font-weight: 600; font-size: 17px; }
+  .card .meta { color: #9ca3af; font-size: 13px; margin-top: 4px; }
+  button { padding: 9px 14px; border: 0; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  button.primary { background: #2563eb; color: #fff; }
+  button.danger { background: #b91c1c; color: #fff; }
+  button.ghost { background: transparent; color: #9ca3af; border: 1px solid #1f2937; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  form { display: flex; gap: 8px; margin-top: 8px; }
+  input[type=text] { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid #1f2937; background: #0b1220; color: #e5e7eb; font-size: 14px; }
+  .empty { color: #6b7280; padding: 24px; text-align: center; border: 1px dashed #1f2937; border-radius: 12px; }
+  .status { padding: 12px 16px; border-radius: 10px; margin-top: 12px; font-size: 14px; }
+  .status.ok { background: #052e1a; border: 1px solid #14532d; color: #86efac; }
+  .status.err { background: #311212; border: 1px solid #7f1d1d; color: #fca5a5; }
+  .status a { color: #fbbf24; }
+  .row { display: flex; gap: 8px; }
+  .help { color: #9ca3af; font-size: 13px; margin-top: 24px; padding: 16px; background: #0b1220; border-left: 3px solid #2563eb; border-radius: 0 8px 8px 0; }
+  .help code { background: #1f2937; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Google аккаунты</h1>
+  <p class="sub">Каждый аккаунт = один OAuth-токен под коротким именем. Агент может работать с любым из них одновременно.</p>
+
+  <div id="list"></div>
+
+  <div class="card" style="flex-direction: column; align-items: stretch;">
+    <div class="alias">Добавить аккаунт</div>
+    <div class="meta">Введите короткое имя (например <code>work</code>, <code>elena</code>) — откроется браузер для входа в Google.</div>
+    <form id="addForm">
+      <input type="text" id="aliasInput" placeholder="например, elena" required pattern="[A-Za-z0-9._@-]+">
+      <button type="submit" class="primary" id="addBtn">Добавить</button>
+    </form>
+    <div id="status"></div>
+  </div>
+
+  <div class="help">
+    <strong>Если ловите "Access blocked: claude-mcp has not completed verification":</strong><br>
+    Google нужно сначала разрешить этому email авторизоваться. Откройте <a id="testUsersLink" href="#" target="_blank">консоль проекта</a>, найдите Test users → Add users → впишите тот email, под которым будете логиниться → Save. Затем попробуйте Добавить аккаунт снова.
+  </div>
+</main>
+
+<script>
+const listEl = document.getElementById('list');
+const statusEl = document.getElementById('status');
+const addBtn = document.getElementById('addBtn');
+const addForm = document.getElementById('addForm');
+const aliasInput = document.getElementById('aliasInput');
+
+const TEST_USERS_URL = "https://console.cloud.google.com/auth/audience?project=claude-mcp-496508";
+document.getElementById('testUsersLink').href = TEST_USERS_URL;
+
+function setStatus(msg, kind, hint) {
+  if (!msg) { statusEl.innerHTML = ''; return; }
+  let html = `<div class="status ${kind}">${msg}`;
+  if (hint) {
+    const linkified = hint.replace(/(https?:\/\/\S+)/, '<a href="$1" target="_blank">$1</a>');
+    html += `<div style="margin-top:6px; font-size:13px;">${linkified}</div>`;
+  }
+  html += `</div>`;
+  statusEl.innerHTML = html;
+}
+
+async function refresh() {
+  const r = await fetch('/api/accounts');
+  const {accounts} = await r.json();
+  if (!accounts.length) {
+    listEl.innerHTML = '<div class="empty">Ни одного аккаунта пока не добавлено. Добавьте первый ниже.</div>';
+    return;
+  }
+  listEl.innerHTML = accounts.map(a => `
+    <div class="card">
+      <div>
+        <div class="alias">${a}</div>
+        <div class="meta">.data/tokens/${a}.json</div>
+      </div>
+      <button class="danger" data-remove="${a}">Удалить</button>
+    </div>
+  `).join('');
+  listEl.querySelectorAll('button[data-remove]').forEach(btn => {
+    btn.onclick = async () => {
+      const alias = btn.dataset.remove;
+      if (!confirm(`Удалить аккаунт '${alias}'? Доступ к Google это не отзывает — токен просто забудется локально.`)) return;
+      btn.disabled = true;
+      await fetch(`/api/accounts/${encodeURIComponent(alias)}`, {method: 'DELETE'});
+      await refresh();
+    };
+  });
+}
+
+addForm.onsubmit = async (e) => {
+  e.preventDefault();
+  const alias = aliasInput.value.trim();
+  if (!alias) return;
+  addBtn.disabled = true;
+  setStatus(`Открывается браузер для входа в аккаунт '${alias}'…`, 'ok');
+
+  try {
+    const r = await fetch('/api/accounts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({alias}),
+    });
+    const result = await r.json();
+
+    if (result.ok) {
+      setStatus(`Аккаунт '${alias}' добавлен ✓`, 'ok');
+      aliasInput.value = '';
+      await refresh();
+    } else {
+      setStatus(`Ошибка: ${result.error}`, 'err', result.hint);
+    }
+  } catch (err) {
+    setStatus(`Сетевая ошибка: ${err}`, 'err');
+  } finally {
+    addBtn.disabled = false;
+  }
+};
+
+refresh();
+</script>
+</body>
+</html>

@@ -7,9 +7,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src import auth
 from src.agent import AgentSession
 from src.config import ALLOWLIST_PATH, PROJECT_ROOT
 from src.policy import Policy
+
+
+GCP_TEST_USERS_URL = "https://console.cloud.google.com/auth/audience?project=claude-mcp-496508"
 
 
 app = FastAPI(title="Google Workspace Chat Agent")
@@ -79,3 +83,45 @@ async def stream(run_id: str):
 async def approve(request_id: str, body: ApproveRequest):
     _session.resolve_approval(request_id, body.approved)
     return {"ok": True}
+
+
+# -------- Account management --------
+
+class AddAccountRequest(BaseModel):
+    alias: str
+
+
+@app.get("/accounts")
+async def accounts_page():
+    return FileResponse(str(STATIC_DIR / "accounts.html"))
+
+
+@app.get("/api/accounts")
+async def list_accounts_api():
+    return {"accounts": auth.list_accounts()}
+
+
+@app.post("/api/accounts")
+async def add_account_api(req: AddAccountRequest):
+    alias = req.alias.strip()
+    if not alias:
+        raise HTTPException(400, "alias is required")
+    if any(c in alias for c in "/\\:*?\"<>|"):
+        raise HTTPException(400, "alias must not contain path-unsafe characters")
+    try:
+        result = await asyncio.to_thread(auth.add_account, alias)
+        return {"ok": True, **result}
+    except Exception as e:
+        msg = str(e)
+        hint = None
+        if "access_denied" in msg or "verification" in msg.lower():
+            hint = (
+                "Google blocked the login because this email is not in the project's Test users list. "
+                f"Add it here: {GCP_TEST_USERS_URL}"
+            )
+        return {"ok": False, "error": f"{type(e).__name__}: {msg}", "hint": hint}
+
+
+@app.delete("/api/accounts/{alias}")
+async def remove_account_api(alias: str):
+    return auth.remove_account(alias)
