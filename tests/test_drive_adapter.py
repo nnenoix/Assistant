@@ -42,6 +42,18 @@ def test_list_files_page_size_clamped(fake_service):
     assert args["pageSize"] == 200  # clamped at upper bound
 
 
+def test_list_shared_with_me(fake_service):
+    fake_service.files().list().execute.return_value = {"files": [{"id": "S1", "name": "shared sheet"}]}
+    result = drive.list_shared_with_me()
+    fake_service.files().list.assert_called_with(
+        q="sharedWithMe = true and trashed = false",
+        fields="files(id,name,mimeType,modifiedTime,owners(emailAddress,displayName))",
+        orderBy="modifiedTime desc",
+        pageSize=50,
+    )
+    assert result == [{"id": "S1", "name": "shared sheet"}]
+
+
 def test_create_folder(fake_service):
     fake_service.files().create().execute.return_value = {"id": "NEW", "name": "X"}
     result = drive.create_folder(parent_id="P", name="X")

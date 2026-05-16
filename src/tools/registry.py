@@ -49,6 +49,18 @@ TOOLS = [
         {"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]},
     ),
     _tool(
+        "drive_list_shared",
+        drive.list_shared_with_me,
+        "drive.read",
+        "List files OTHER users have shared with the current account (Drive 'Shared with me'). Use this when the user asks about a file/folder/sheet that isn't in their own My Drive. Returns id, name, mimeType, modifiedTime, and owners.",
+        {
+            "type": "object",
+            "properties": {
+                "page_size": {"type": "integer", "description": "Max results to return, default 50, max 200"},
+            },
+        },
+    ),
+    _tool(
         "drive_create_folder",
         drive.create_folder,
         "drive.create",

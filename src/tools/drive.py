@@ -30,6 +30,19 @@ def list_files(folder_id: str = "root", query: str | None = None, page_size: int
     return resp.get("files", [])
 
 
+def list_shared_with_me(page_size: int = 50) -> list[dict]:
+    """List files shared with the current user (Drive 'Shared with me' view).
+    Returns slim metadata including the owner's email so the agent can disambiguate.
+    """
+    resp = _service().files().list(
+        q="sharedWithMe = true and trashed = false",
+        fields="files(id,name,mimeType,modifiedTime,owners(emailAddress,displayName))",
+        orderBy="modifiedTime desc",
+        pageSize=min(max(page_size, 1), 200),
+    ).execute()
+    return resp.get("files", [])
+
+
 def get_metadata(file_id: str) -> dict:
     return _service().files().get(
         fileId=file_id,
