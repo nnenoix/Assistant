@@ -73,3 +73,28 @@ def remove(id: int) -> dict:
     notes = [n for n in notes if n.get("id") != id]
     _save(notes)
     return {"removed": before - len(notes) > 0, "id": id}
+
+
+def search_semantic(query: str, top_k: int = 8) -> list[dict]:
+    """Semantic search across notes using local embeddings. Falls back to
+    substring search if the embedding model isn't available.
+    """
+    from src import embeddings
+
+    notes = _load()
+    if not notes:
+        return []
+
+    embeddings.upsert(
+        scope="notes",
+        items=[
+            {"key": str(n["id"]), "text": n["text"] + (f"  [{n['tag']}]" if n.get("tag") else ""), "meta": n}
+            for n in notes
+        ],
+    )
+    embeddings.purge(scope="notes", keep_keys={str(n["id"]) for n in notes})
+
+    hits = embeddings.query(scope="notes", text=query, top_k=top_k)
+    if not hits:
+        return search(query)  # fallback to substring
+    return [{"score": round(h["score"], 4), **h["meta"]} for h in hits]

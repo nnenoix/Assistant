@@ -10,7 +10,7 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src.tools import apps_script, chats, drive, excel, local_fs, notes, people, sheets
+from src.tools import apps_script, chats, drive, excel, gmail, local_fs, notes, people, sheets
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -264,6 +264,68 @@ TOOLS = [
             "required": ["spreadsheet_id", "query"],
         },
     ),
+    _tool(
+        "sheets_find_and_replace",
+        sheets.find_and_replace,
+        "sheets.write",
+        "Sheets-native find-and-replace via batchUpdate — one call, no read/write cycle. Auto-snapshots affected scope first (recoverable via sheets_rollback). Optional `sheet` to limit to one tab. Supports match_case, match_entire_cell, use_regex flags.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "find": {"type": "string"},
+                "replace": {"type": "string"},
+                "sheet": {"type": "string", "description": "Optional tab name; if omitted, replaces in all sheets."},
+                "match_case": {"type": "boolean"},
+                "match_entire_cell": {"type": "boolean"},
+                "use_regex": {"type": "boolean"},
+            },
+            "required": ["spreadsheet_id", "find", "replace"],
+        },
+    ),
+    _tool(
+        "sheets_list_backups",
+        sheets.list_backups,
+        "sheets.read",
+        "List recent automatic snapshots taken before write/clear/find_and_replace operations on a spreadsheet. Each entry has snapshot_id, ts, range, op.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "limit": {"type": "integer", "description": "Default 20."},
+            },
+            "required": ["spreadsheet_id"],
+        },
+    ),
+    _tool(
+        "sheets_rollback",
+        sheets.rollback,
+        "sheets.write",
+        "Restore a previously saved snapshot. If snapshot_id is omitted, uses the most recent snapshot. The affected range is cleared and rewritten with the snapshot's values. Use when the user says 'отмени' / 'верни как было'.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "snapshot_id": {"type": "string", "description": "Optional. Omit to use the most recent snapshot."},
+            },
+            "required": ["spreadsheet_id"],
+        },
+    ),
+    _tool(
+        "sheets_excel_to_sheets",
+        sheets.excel_to_sheets,
+        "sheets.write",
+        "End-to-end pipeline: parse a local .xlsx file, create a new Google Spreadsheet, optionally move it into parent_folder_id, and copy every workbook sheet over (preserving sheet names). Returns the new spreadsheet_id and url. Replaces excel_parse + sheets_create_spreadsheet + multiple sheets_write_range calls.",
+        {
+            "type": "object",
+            "properties": {
+                "local_path": {"type": "string"},
+                "title": {"type": "string", "description": "Optional; defaults to the xlsx filename without extension."},
+                "parent_folder_id": {"type": "string", "description": "Optional Drive folder to move the new spreadsheet into."},
+            },
+            "required": ["local_path"],
+        },
+    ),
     # --- Apps Script ---
     _tool(
         "apps_script_clone",
@@ -399,6 +461,13 @@ TOOLS = [
         "Substring search across ALL saved chats. Returns matches with short snippets so you can decide which chat to read in full. Use when the user references prior work ('что мы делали с таблицей X на прошлой неделе').",
         {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]},
     ),
+    _tool(
+        "chats_search_semantic",
+        chats.search_semantic,
+        "chats.read",
+        "SEMANTIC search across saved chats using local embeddings. Better than chats_search for fuzzy queries ('налоги' matches 'НДС', 'отчёт' matches 'reports'). Prefer this over chats_search unless you have an exact substring in mind. Falls back to substring if the embedding model isn't installed.",
+        {"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["query"]},
+    ),
     # --- Notes (persistent agent memory across sessions) ---
     _tool(
         "notes_add",
@@ -427,6 +496,13 @@ TOOLS = [
         "notes.read",
         "Find notes by substring across text and tag. Check this when the user asks about something they previously told you ('что я говорил про НДС?', 'какой был ID той презентации?').",
         {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    ),
+    _tool(
+        "notes_search_semantic",
+        notes.search_semantic,
+        "notes.read",
+        "SEMANTIC search across notes using local embeddings. Better at fuzzy retrieval ('налоги' → notes about НДС/налогообложении). Prefer this over notes_search unless looking for an exact substring. Falls back to substring if the embedding model isn't installed.",
+        {"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["query"]},
     ),
     _tool(
         "notes_remove",
@@ -472,6 +548,74 @@ TOOLS = [
         "people.write",
         "Drop a person from the registry by account alias.",
         {"type": "object", "properties": {"account": {"type": "string"}}, "required": ["account"]},
+    ),
+    # --- Gmail ---
+    _tool(
+        "gmail_search",
+        gmail.search,
+        "gmail.read",
+        "Search emails using Gmail's native query syntax (same as the search bar): 'from:elena', 'has:attachment', 'subject:invoice', 'newer_than:7d'. Returns slim metadata (id, from, subject, date, snippet, labels).",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "description": "Default 20, max 100."},
+            },
+            "required": ["query"],
+        },
+    ),
+    _tool(
+        "gmail_get_message",
+        gmail.get_message,
+        "gmail.read",
+        "Read a full message: headers, plain-text body (capped at 20k chars), and list of attachments. Returns body_text and the attachment list with attachment_ids you can download separately.",
+        {"type": "object", "properties": {"message_id": {"type": "string"}}, "required": ["message_id"]},
+    ),
+    _tool(
+        "gmail_download_attachment",
+        gmail.download_attachment,
+        "gmail.read",
+        "Save an attachment to a local path. Pass message_id and attachment_id from gmail_get_message.",
+        {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string"},
+                "attachment_id": {"type": "string"},
+                "dest_path": {"type": "string"},
+            },
+            "required": ["message_id", "attachment_id", "dest_path"],
+        },
+    ),
+    _tool(
+        "gmail_create_draft",
+        gmail.create_draft,
+        "gmail.draft",
+        "Create a DRAFT email (does NOT send). Always create a draft FIRST so the user can review; then call gmail_send_draft to actually send.",
+        {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "cc": {"type": "string"},
+                "bcc": {"type": "string"},
+            },
+            "required": ["to", "subject", "body"],
+        },
+    ),
+    _tool(
+        "gmail_send_draft",
+        gmail.send_draft,
+        "gmail.send",
+        "Send a draft created by gmail_create_draft. SEPARATE call so the user gets one explicit approval prompt before any email actually leaves the account.",
+        {"type": "object", "properties": {"draft_id": {"type": "string"}}, "required": ["draft_id"]},
+    ),
+    _tool(
+        "gmail_list_labels",
+        gmail.list_labels,
+        "gmail.read",
+        "List Gmail labels (system + user-created). Useful for narrowing searches with 'label:foo'.",
+        {"type": "object", "properties": {}},
     ),
 ]
 

@@ -18,3 +18,55 @@ def read(chat_id: str) -> dict:
 def search(query: str, limit: int = 10) -> list[dict]:
     """Substring search across all saved chats. Returns matches with snippets."""
     return _impl.search_chats(query=query, limit=limit)
+
+
+def search_semantic(query: str, top_k: int = 8) -> list[dict]:
+    """Semantic search across saved chats using local embeddings. Each chat
+    is indexed by its flattened text (user + assistant content). Falls back to
+    substring search if the embedding model is unavailable.
+    """
+    from pathlib import Path
+    from src import chats as _chats
+    from src import embeddings
+
+    items = []
+    metas: dict[str, dict] = {}
+    for p in sorted(_chats.CHATS_DIR.glob("*.json")):
+        try:
+            import json
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        chunks = []
+        for m in data.get("messages", []):
+            if m.get("role") == "user":
+                chunks.append(m.get("text", ""))
+            else:
+                chunks.append(_chats._assistant_text(m))
+        text = "\n".join(c for c in chunks if c).strip()
+        if not text:
+            continue
+        # Truncate per-chat to keep encoding fast; long chats encoded as the
+        # head, where the topic usually lives.
+        items.append({
+            "key": data["id"],
+            "text": text[:4000],
+            "meta": {
+                "id": data["id"],
+                "title": data.get("title"),
+                "started_at": data.get("started_at"),
+                "message_count": len(data.get("messages", [])),
+            },
+        })
+        metas[data["id"]] = items[-1]["meta"]
+
+    if not items:
+        return []
+
+    embeddings.upsert(scope="chats", items=items)
+    embeddings.purge(scope="chats", keep_keys=set(metas.keys()))
+
+    hits = embeddings.query(scope="chats", text=query, top_k=top_k)
+    if not hits:
+        return _impl.search_chats(query=query, limit=top_k)  # fallback to substring
+    return [{"score": round(h["score"], 4), **h["meta"]} for h in hits]

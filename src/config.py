@@ -20,6 +20,7 @@ if CLIENT_SECRET_PATH is None:
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/gmail.modify",
 ]
 
 DEFAULT_MODEL = "claude-sonnet-4-6"

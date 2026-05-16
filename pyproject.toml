@@ -14,6 +14,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "claude-agent-sdk>=0.2.82",
     "pywebview>=6.2.1",
+    "sentence-transformers>=5.5.0",
 ]
 
 [dependency-groups]
