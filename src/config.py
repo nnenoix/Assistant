@@ -3,7 +3,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / ".data"
 SCRIPTS_DIR = DATA_DIR / "scripts"
-TOKEN_PATH = DATA_DIR / "token.json"
 ALLOWLIST_PATH = DATA_DIR / "allowlist.json"
 
 # OAuth client secret file — match by glob, the engineer has only one

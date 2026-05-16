@@ -22,11 +22,24 @@ In Google Cloud Console for that project:
 uv sync
 ```
 
-## First run (triggers OAuth)
+## First run (triggers OAuth for account "main")
 ```powershell
-uv run python -c "from src.auth import get_credentials; get_credentials()"
+uv run python -m src.cli add main
 ```
-A browser will open. Grant access. `token.json` is saved under `.data/`.
+A browser will open. Log into the Google account you want as your default. Token is saved to `.data/tokens/main.json`.
+
+## Multiple Google accounts
+Add additional accounts at any time:
+```powershell
+uv run python -m src.cli add partner    # opens browser, log into partner's Google account
+uv run python -m src.cli add work       # repeat for as many accounts as you want
+uv run python -m src.cli list           # see all configured aliases
+uv run python -m src.cli remove partner # forget a token (does not revoke in Google)
+```
+
+You can also do this from the chat — ask the agent to "add an account called X" and it will call `auth_add_account` (will prompt for approval, then opens browser).
+
+In conversation, just reference accounts by alias: *"compare the same sheet in main vs partner"* — the agent passes `account="main"` and `account="partner"` to each tool call. Every Drive and Sheets tool accepts an optional `account` parameter (default `"main"`).
 
 ## Start the chat server
 ```powershell
@@ -53,6 +66,7 @@ Schema:
 - `sheets.read|write`: `"*"` or list of spreadsheet IDs
 - `local.read|write`: list of absolute path roots (path-traversal-safe via `Path.resolve()` prefix check)
 - `apps_script.edit|run`: list of script IDs
+- `auth.list|add|remove`: `"*"` for list (safe), empty list for add/remove (always require approval — adding/removing accounts is sensitive)
 
 Default scaffold grants `read` everywhere and read-only on `D:/Google work`. All writes require approval.
 

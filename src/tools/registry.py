@@ -9,14 +9,30 @@ import json
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from src import auth
 from src.tools import apps_script, drive, excel, local_fs, sheets
 
 
 MCP_SERVER_NAME = "gworkagent"
 # Claude sees tools as: mcp__gworkagent__<tool_name>
 
+_ACCOUNT_PROP = {
+    "type": "string",
+    "description": "OAuth account alias (default 'main'). Call auth_list_accounts to see available aliases.",
+}
+
 
 def _tool(name, fn, policy_op, description, input_schema):
+    """Build a tool spec. If `fn` accepts an `account` parameter, the schema
+    is automatically augmented with an optional `account` field so Claude
+    knows it can target a specific Google account."""
+    accepts_account = "account" in fn.__code__.co_varnames[: fn.__code__.co_argcount]
+    if accepts_account:
+        input_schema = dict(input_schema)
+        props = dict(input_schema.get("properties", {}))
+        if "account" not in props:
+            props["account"] = _ACCOUNT_PROP
+        input_schema["properties"] = props
     return {
         "name": name,
         "fn": fn,
@@ -278,6 +294,38 @@ TOOLS = [
         "local.read",
         "List entries in a local directory.",
         {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
+    # --- Auth (multi-account) ---
+    _tool(
+        "auth_list_accounts",
+        auth.list_accounts,
+        "auth.list",
+        "List configured OAuth account aliases. Each alias corresponds to a Google account whose Drive/Sheets the agent can read and edit.",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "auth_add_account",
+        auth.add_account,
+        "auth.add",
+        "Authorize a new Google account under the given alias. Opens a browser on this machine; the user must log in and grant permissions. Blocks until the OAuth flow completes (~30s).",
+        {
+            "type": "object",
+            "properties": {
+                "account": {"type": "string", "description": "Short alias for the new account, e.g. 'work', 'partner', or an email."},
+            },
+            "required": ["account"],
+        },
+    ),
+    _tool(
+        "auth_remove_account",
+        auth.remove_account,
+        "auth.remove",
+        "Forget the stored token for the given account alias. Does NOT revoke the OAuth grant in the Google account itself.",
+        {
+            "type": "object",
+            "properties": {"account": {"type": "string"}},
+            "required": ["account"],
+        },
     ),
 ]
 

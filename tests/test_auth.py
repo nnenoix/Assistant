@@ -1,67 +1,118 @@
 import json
-from pathlib import Path
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 from src import auth
 
 
-def test_load_existing_valid_credentials(tmp_path, monkeypatch):
-    """If token.json exists and is valid, return creds without browser flow."""
-    token_path = tmp_path / "token.json"
-    fake_token = {
+@pytest.fixture
+def fresh_tokens_dir(tmp_path, monkeypatch):
+    """Redirect auth's tokens dir + legacy token path to a clean tmp dir for each test."""
+    tokens_dir = tmp_path / "tokens"
+    tokens_dir.mkdir()
+    monkeypatch.setattr(auth, "TOKENS_DIR", tokens_dir)
+    monkeypatch.setattr(auth, "_LEGACY_TOKEN", tmp_path / "token.json")
+    return tokens_dir
+
+
+def _write_token(path, scopes=None):
+    payload = {
         "token": "fake_access",
         "refresh_token": "fake_refresh",
         "token_uri": "https://oauth2.googleapis.com/token",
         "client_id": "fake_client",
         "client_secret": "fake_secret",
-        "scopes": ["https://www.googleapis.com/auth/drive"],
+        "scopes": scopes or ["https://www.googleapis.com/auth/drive"],
     }
-    token_path.write_text(json.dumps(fake_token))
+    path.write_text(json.dumps(payload))
 
-    monkeypatch.setattr(auth, "TOKEN_PATH", token_path)
-    monkeypatch.setattr(auth, "SCOPES", ["https://www.googleapis.com/auth/drive"])
 
+def test_list_accounts_empty(fresh_tokens_dir):
+    assert auth.list_accounts() == []
+
+
+def test_list_accounts_returns_aliases(fresh_tokens_dir):
+    _write_token(fresh_tokens_dir / "main.json")
+    _write_token(fresh_tokens_dir / "work.json")
+    assert auth.list_accounts() == ["main", "work"]
+
+
+def test_legacy_token_migrates_to_main(tmp_path, monkeypatch):
+    tokens_dir = tmp_path / "tokens"
+    tokens_dir.mkdir()
+    legacy = tmp_path / "token.json"
+    _write_token(legacy)
+    monkeypatch.setattr(auth, "TOKENS_DIR", tokens_dir)
+    monkeypatch.setattr(auth, "_LEGACY_TOKEN", legacy)
+
+    accs = auth.list_accounts()
+    assert accs == ["main"]
+    assert not legacy.exists()
+    assert (tokens_dir / "main.json").exists()
+
+
+def test_load_existing_valid_credentials(fresh_tokens_dir):
+    _write_token(fresh_tokens_dir / "main.json")
     fake_creds = MagicMock(valid=True, expired=False)
     with patch.object(auth.Credentials, "from_authorized_user_file", return_value=fake_creds) as m:
-        result = auth.get_credentials()
-
-    m.assert_called_once_with(str(token_path), ["https://www.googleapis.com/auth/drive"])
+        result = auth.get_credentials("main")
+    m.assert_called_once()
     assert result is fake_creds
 
 
-def test_refresh_expired_credentials(tmp_path, monkeypatch):
-    """If creds expired but have refresh_token, refresh and save."""
-    token_path = tmp_path / "token.json"
-    token_path.write_text("{}")
-    monkeypatch.setattr(auth, "TOKEN_PATH", token_path)
+def test_get_credentials_for_specific_alias(fresh_tokens_dir):
+    _write_token(fresh_tokens_dir / "work.json")
+    fake_creds = MagicMock(valid=True, expired=False)
+    with patch.object(auth.Credentials, "from_authorized_user_file", return_value=fake_creds) as m:
+        auth.get_credentials("work")
+    called_path = m.call_args.args[0]
+    assert called_path.endswith("work.json")
 
+
+def test_refresh_expired_credentials(fresh_tokens_dir):
+    path = fresh_tokens_dir / "main.json"
+    _write_token(path)
     fake_creds = MagicMock(valid=False, expired=True, refresh_token="rt")
-    fake_creds.to_json.return_value = '{"token": "new"}'
-
+    fake_creds.to_json.return_value = '{"token": "refreshed"}'
     with patch.object(auth.Credentials, "from_authorized_user_file", return_value=fake_creds), \
          patch.object(auth, "Request") as mock_request:
-        result = auth.get_credentials()
-
+        auth.get_credentials("main")
     fake_creds.refresh.assert_called_once_with(mock_request.return_value)
-    assert token_path.read_text() == '{"token": "new"}'
-    assert result is fake_creds
+    assert path.read_text() == '{"token": "refreshed"}'
 
 
-def test_runs_oauth_flow_when_no_token(tmp_path, monkeypatch):
-    """If no token file, run InstalledAppFlow and save the result."""
-    token_path = tmp_path / "token.json"
-    monkeypatch.setattr(auth, "TOKEN_PATH", token_path)
-    monkeypatch.setattr(auth, "CLIENT_SECRET_PATH", tmp_path / "cs.json")
-
+def test_runs_oauth_flow_when_no_token(fresh_tokens_dir, monkeypatch):
+    monkeypatch.setattr(auth, "CLIENT_SECRET_PATH", fresh_tokens_dir.parent / "cs.json")
     fake_creds = MagicMock()
     fake_creds.to_json.return_value = '{"token": "fresh"}'
     fake_flow = MagicMock()
     fake_flow.run_local_server.return_value = fake_creds
-
-    with patch.object(auth.InstalledAppFlow, "from_client_secrets_file", return_value=fake_flow) as m:
-        result = auth.get_credentials()
-
-    m.assert_called_once()
+    with patch.object(auth.InstalledAppFlow, "from_client_secrets_file", return_value=fake_flow):
+        auth.get_credentials("new")
     fake_flow.run_local_server.assert_called_once_with(port=0)
-    assert token_path.read_text() == '{"token": "fresh"}'
-    assert result is fake_creds
+    assert (fresh_tokens_dir / "new.json").read_text() == '{"token": "fresh"}'
+
+
+def test_add_account_runs_flow_and_saves(fresh_tokens_dir, monkeypatch):
+    monkeypatch.setattr(auth, "CLIENT_SECRET_PATH", fresh_tokens_dir.parent / "cs.json")
+    fake_creds = MagicMock()
+    fake_creds.to_json.return_value = '{"token": "added"}'
+    fake_flow = MagicMock()
+    fake_flow.run_local_server.return_value = fake_creds
+    with patch.object(auth.InstalledAppFlow, "from_client_secrets_file", return_value=fake_flow):
+        result = auth.add_account("partner")
+    assert (fresh_tokens_dir / "partner.json").exists()
+    assert result["account"] == "partner"
+
+
+def test_remove_account_existing(fresh_tokens_dir):
+    _write_token(fresh_tokens_dir / "work.json")
+    result = auth.remove_account("work")
+    assert result["removed"] is True
+    assert not (fresh_tokens_dir / "work.json").exists()
+
+
+def test_remove_account_missing(fresh_tokens_dir):
+    result = auth.remove_account("nope")
+    assert result["removed"] is False
