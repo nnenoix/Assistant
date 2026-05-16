@@ -10,7 +10,7 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src.tools import apps_script, chats, drive, excel, local_fs, notes, sheets
+from src.tools import apps_script, chats, drive, excel, local_fs, notes, people, sheets
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -434,6 +434,44 @@ TOOLS = [
         "notes.write",
         "Delete a note by id. Use when the user explicitly asks to forget something.",
         {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+    ),
+    # --- People registry (name → account alias resolver) ---
+    _tool(
+        "people_list",
+        people.list_people,
+        "people.read",
+        "List all people in the registry. Each entry binds one or more human names (and optionally an email) to a Google account alias.",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "people_resolve",
+        people.resolve,
+        "people.read",
+        "Resolve a free-text reference like 'Лена', 'у партнёра', or an email into matching registry entries. ALWAYS call this FIRST when the user mentions a person by name and you need to figure out which account's Drive/Sheets to operate on. Exactly one hit → use that .account. Multiple → ask the user to disambiguate. Zero hits → ask the user to confirm the person and call people_add.",
+        {"type": "object", "properties": {"hint": {"type": "string"}}, "required": ["hint"]},
+    ),
+    _tool(
+        "people_add",
+        people.add,
+        "people.write",
+        "Register a person or merge new info into an existing entry. Bind multiple names (including nicknames and typo variants) to one account alias. Call this proactively when the user introduces a new person ('у Тани в drive есть таблица', 'мой коллега Pavel из work-аккаунта').",
+        {
+            "type": "object",
+            "properties": {
+                "account": {"type": "string", "description": "The OAuth alias (must already exist; create via auth_add_account first)."},
+                "names": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}], "description": "One name or a list of names/nicknames/variants."},
+                "email": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["account", "names"],
+        },
+    ),
+    _tool(
+        "people_remove",
+        people.remove,
+        "people.write",
+        "Drop a person from the registry by account alias.",
+        {"type": "object", "properties": {"account": {"type": "string"}}, "required": ["account"]},
     ),
 ]
 
