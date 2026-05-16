@@ -31,7 +31,10 @@ class Policy:
     @staticmethod
     def _matches(category: str, action: str, args: dict, allow: list[str]) -> bool:
         if category == "drive":
-            key = {"create": "parent_id", "update": "file_id", "delete": "file_id", "read": "file_id"}.get(action)
+            if action == "read":
+                # Read ops use either file_id (get/download) or folder_id (list); search has no ID.
+                return args.get("file_id") in allow or args.get("folder_id") in allow
+            key = {"create": "parent_id", "update": "file_id", "delete": "file_id"}.get(action)
             return args.get(key) in allow if key else False
         if category == "sheets":
             return args.get("spreadsheet_id") in allow

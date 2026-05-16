@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -9,14 +10,19 @@ class ClaspError(RuntimeError):
     pass
 
 
+_CLASP_BIN = shutil.which("clasp")
+
+
 def _run_clasp(args: list[str], cwd: Path | None = None) -> str:
+    if _CLASP_BIN is None:
+        raise ClaspError("clasp not found on PATH. Install via `npm install -g @google/clasp`.")
     proc = subprocess.run(
-        ["clasp", *args],
+        [_CLASP_BIN, *args],
         cwd=cwd,
         capture_output=True,
         text=True,
         encoding="utf-8",
-        shell=True,
+        shell=False,
     )
     if proc.returncode != 0:
         raise ClaspError(f"clasp {' '.join(args)} failed: {proc.stderr.strip() or proc.stdout.strip()}")

@@ -63,3 +63,17 @@ def test_local_with_empty_or_missing_path_denied(policy_file):
     p = Policy.load(policy_file)
     assert p.is_allowed("local.write", {}) is False
     assert p.is_allowed("local.write", {"path": ""}) is False
+
+
+def test_drive_read_matches_folder_id_when_non_wildcard(tmp_path):
+    path = tmp_path / "al.json"
+    path.write_text(json.dumps({"drive": {"read": ["FOLDER_X", "FILE_Y"]}}))
+    p = Policy.load(path)
+    # list_files passes folder_id
+    assert p.is_allowed("drive.read", {"folder_id": "FOLDER_X"}) is True
+    # get_metadata / download pass file_id
+    assert p.is_allowed("drive.read", {"file_id": "FILE_Y"}) is True
+    # something not in the list
+    assert p.is_allowed("drive.read", {"folder_id": "OTHER"}) is False
+    # search has no id at all → always denied under non-wildcard
+    assert p.is_allowed("drive.read", {"name_contains": "report"}) is False
