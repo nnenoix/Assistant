@@ -31,12 +31,13 @@ TOOLS = [
         "drive_list_files",
         drive.list_files,
         "drive.read",
-        "List files in a Google Drive folder. folder_id='root' for My Drive root.",
+        "List files in a Google Drive folder ordered by recently modified. folder_id='root' for My Drive root. Returns slim metadata (id, name, mimeType, modifiedTime) — for full info on a specific file use drive_get_metadata.",
         {
             "type": "object",
             "properties": {
                 "folder_id": {"type": "string", "default": "root"},
                 "query": {"type": "string", "description": "Optional Drive query, e.g. \"name contains 'report'\""},
+                "page_size": {"type": "integer", "description": "Max results to return, default 50, max 200"},
             },
         },
     ),

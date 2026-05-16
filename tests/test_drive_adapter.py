@@ -17,20 +17,29 @@ def test_list_files_passes_query(fake_service):
     result = drive.list_files(folder_id="ROOT", query=None)
     fake_service.files().list.assert_called_with(
         q="'ROOT' in parents and trashed = false",
-        fields="files(id,name,mimeType,modifiedTime,size,parents)",
-        pageSize=200,
+        fields="files(id,name,mimeType,modifiedTime)",
+        orderBy="modifiedTime desc",
+        pageSize=50,
     )
     assert result == [{"id": "1", "name": "f"}]
 
 
 def test_list_files_with_extra_query(fake_service):
     fake_service.files().list().execute.return_value = {"files": []}
-    drive.list_files(folder_id="ROOT", query="name contains 'report'")
+    drive.list_files(folder_id="ROOT", query="name contains 'report'", page_size=10)
     fake_service.files().list.assert_called_with(
         q="'ROOT' in parents and trashed = false and (name contains 'report')",
-        fields="files(id,name,mimeType,modifiedTime,size,parents)",
-        pageSize=200,
+        fields="files(id,name,mimeType,modifiedTime)",
+        orderBy="modifiedTime desc",
+        pageSize=10,
     )
+
+
+def test_list_files_page_size_clamped(fake_service):
+    fake_service.files().list().execute.return_value = {"files": []}
+    drive.list_files(folder_id="ROOT", page_size=500)
+    args = fake_service.files().list.call_args.kwargs
+    assert args["pageSize"] == 200  # clamped at upper bound
 
 
 def test_create_folder(fake_service):

@@ -14,14 +14,18 @@ def _service():
     return build("drive", "v3", credentials=get_credentials(), cache_discovery=False)
 
 
-def list_files(folder_id: str = "root", query: str | None = None) -> list[dict]:
+def list_files(folder_id: str = "root", query: str | None = None, page_size: int = 50) -> list[dict]:
+    """List files in a Drive folder. Returns slim metadata (id, name, mimeType, modifiedTime).
+    For full metadata of a specific file call get_metadata.
+    """
     q = f"'{folder_id}' in parents and trashed = false"
     if query:
         q += f" and ({query})"
     resp = _service().files().list(
         q=q,
-        fields="files(id,name,mimeType,modifiedTime,size,parents)",
-        pageSize=200,
+        fields="files(id,name,mimeType,modifiedTime)",
+        orderBy="modifiedTime desc",
+        pageSize=min(max(page_size, 1), 200),
     ).execute()
     return resp.get("files", [])
 

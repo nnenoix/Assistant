@@ -98,12 +98,21 @@ class AgentSession:
             await self._current_emit({"type": "tool_denied", "name": unprefixed})
         return PermissionResultDeny(message="User denied this action")
 
+    # Built-in Claude Code CLI tools we never want exposed to this agent.
+    # The agent should only operate via the 28 mcp__gworkagent__* tools.
+    _BLOCKED_BUILTINS = [
+        "Bash", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep",
+        "NotebookEdit", "Task", "TodoWrite", "WebFetch", "WebSearch",
+        "ToolSearch", "BashOutput", "KillBash", "ExitPlanMode",
+    ]
+
     async def _ensure_client(self) -> ClaudeSDKClient:
         if self._client is None:
             all_tools = [f"mcp__{MCP_SERVER_NAME}__{name}" for name in POLICY_OP_BY_TOOL]
             options = ClaudeAgentOptions(
                 mcp_servers={MCP_SERVER_NAME: self._mcp_server},
                 allowed_tools=all_tools,
+                disallowed_tools=self._BLOCKED_BUILTINS,
                 can_use_tool=self._can_use_tool,
                 system_prompt=SYSTEM_PROMPT,
                 permission_mode="default",
