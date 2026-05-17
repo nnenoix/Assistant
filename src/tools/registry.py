@@ -419,11 +419,47 @@ TOOLS = [
         "apps_script_api_get_content",
         apps_script_api.get_content,
         "apps_script.edit",
-        "Read FULL source of an Apps Script project via the official API (not clasp). Returns {scriptId, files:[{name, type, source}]}. Works for any account where the configured OAuth token has script.projects scope and the user has at least Reader access. Type is SERVER_JS / JSON (for appsscript.json) / HTML.",
+        "Read FULL source of an Apps Script project (ALL files inline). Often returns 100k+ chars on real projects — gets TRUNCATED. Prefer apps_script_api_list_files (just names+sizes) + apps_script_api_get_file (one file, staged to disk) for normal work. Use this only when you genuinely need everything in memory.",
         {
             "type": "object",
             "properties": {"script_id": {"type": "string"}},
             "required": ["script_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_list_files",
+        apps_script_api.list_files,
+        "apps_script.edit",
+        "List file names + types + sizes (lines, bytes) of an Apps Script project. NO source content — won't blow the token cap. Use this FIRST to see what's in the project, then fetch the specific file you care about with apps_script_api_get_file.",
+        {
+            "type": "object",
+            "properties": {"script_id": {"type": "string"}},
+            "required": ["script_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_get_file",
+        apps_script_api.get_file,
+        "apps_script.edit",
+        "Fetch ONE file from an Apps Script project and STAGE it locally to `.data/staging/<script_id>/<file_name>.gs`. Returns staged_path + preview. The agent then reads the staged file via local_read_file (with offset/limit for very large files), composes a fix, and pushes back via apps_script_api_edit_file. This is the canonical local-first read path.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "file_name": {"type": "string", "description": "Without extension. E.g. '2.3 Финансы с датой отчета'."},
+            },
+            "required": ["script_id", "file_name"],
+        },
+    ),
+    _tool(
+        "apps_script_api_find_bound_script",
+        apps_script_api.find_bound_script,
+        "apps_script.edit",
+        "Find Apps Script project(s) bound to a specific spreadsheet. Bound scripts do NOT appear in Drive search by mime_type='script'. This helper brute-forces it: enumerates every script visible to the account, calls projects.get on each, filters by parentId. Slow on accounts with many scripts (~1s each). Returns [{script_id, title}].",
+        {
+            "type": "object",
+            "properties": {"spreadsheet_id": {"type": "string"}},
+            "required": ["spreadsheet_id"],
         },
     ),
     _tool(

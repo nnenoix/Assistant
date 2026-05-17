@@ -140,6 +140,101 @@ def update_library_dependency(
     }
 
 
+def get_file(
+    script_id: str,
+    file_name: str,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Fetch ONE file from an Apps Script project and STAGE it locally to
+    `.data/staging/<script_id>/<file_name>.gs`. Returns {staged_path,
+    bytes, lines, type, preview_first_30_lines}. The agent should then
+    read the full file via local_read_file (no truncation cap on local reads
+    of staged files, since they're under our control), compose its fix, and
+    push back with apps_script_api_edit_file.
+
+    This is the canonical local-first read path — `get_content` returns the
+    whole project (which is often huge) and gets truncated.
+    """
+    from src.config import DATA_DIR
+
+    content = get_content(script_id, account=account)
+    target = next((f for f in content.get("files", []) if f.get("name") == file_name), None)
+    if target is None:
+        names = [f.get("name") for f in content.get("files", [])]
+        raise ValueError(f"file {file_name!r} not found in {script_id}; available: {names}")
+
+    src = target.get("source", "")
+    staging_dir = DATA_DIR / "staging" / script_id
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    # Map type to extension
+    ext_map = {"SERVER_JS": ".gs", "JSON": ".json", "HTML": ".html"}
+    ext = ext_map.get(target.get("type", "SERVER_JS"), ".gs")
+    path = staging_dir / f"{file_name}{ext}"
+    path.write_text(src, encoding="utf-8")
+
+    lines = src.splitlines()
+    preview = "\n".join(lines[:30])
+    return {
+        "staged_path": str(path),
+        "bytes": len(src.encode("utf-8")),
+        "lines": len(lines),
+        "type": target.get("type"),
+        "preview_first_30_lines": preview,
+    }
+
+
+def list_files(script_id: str, account: str = DEFAULT_ACCOUNT) -> list[dict]:
+    """List file names + types + sizes for an Apps Script project — NO
+    source content (so doesn't get truncated). Use this to see what's in
+    the project, then fetch the specific file you need via get_file.
+    """
+    content = get_content(script_id, account=account)
+    return [
+        {
+            "name": f.get("name"),
+            "type": f.get("type"),
+            "bytes": len((f.get("source") or "").encode("utf-8")),
+            "lines": len((f.get("source") or "").splitlines()),
+        }
+        for f in content.get("files", [])
+    ]
+
+
+def find_bound_script(spreadsheet_id: str, account: str = DEFAULT_ACCOUNT) -> list[dict]:
+    """Find Apps Script projects bound to a specific spreadsheet. Bound
+    scripts are NOT discoverable via Drive search — they don't appear in
+    files.list with mimeType='script'. This helper brute-forces it:
+    lists every script project visible to the account (via Drive's regular
+    listing), then calls Apps Script API's projects.get on each to read
+    parentId, filters to those whose parentId matches the spreadsheet.
+
+    Returns [{script_id, title}] — typically 0 or 1 entries. Slow on
+    accounts with many scripts (~1s per script).
+    """
+    from src.tools import drive as _drive
+
+    candidates: list[dict] = []
+    # Scripts the account OWNS (not shared)
+    for f in _drive.list_files(folder_id="root", page_size=200, account=account):
+        if f.get("mimeType") == "application/vnd.google-apps.script":
+            candidates.append({"id": f["id"], "name": f.get("name")})
+    # Also try a general scan via search of all scripts
+    for f in _drive.search("", mime_type="application/vnd.google-apps.script", page_size=200, account=account):
+        if f.get("mimeType") == "application/vnd.google-apps.script":
+            if not any(c["id"] == f["id"] for c in candidates):
+                candidates.append({"id": f["id"], "name": f.get("name")})
+
+    matches: list[dict] = []
+    for c in candidates:
+        try:
+            meta = get_project(c["id"], account=account)
+            if meta.get("parentId") == spreadsheet_id:
+                matches.append({"script_id": c["id"], "title": meta.get("title") or c.get("name")})
+        except Exception:
+            continue
+    return matches
+
+
 def edit_file(
     script_id: str,
     file_name: str,
