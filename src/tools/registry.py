@@ -10,7 +10,7 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src.tools import apps_script, apps_script_api, chats, drive, excel, gmail, local_fs, macros, notes, people, sheets
+from src.tools import apps_script, apps_script_api, calendar, chats, drive, excel, gmail, local_fs, macros, notes, people, sheets
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -648,6 +648,115 @@ TOOLS = [
         "local.read",
         "List entries in a local directory.",
         {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
+    # --- Google Calendar ---
+    _tool(
+        "calendar_list_calendars",
+        calendar.list_calendars,
+        "calendar.read",
+        "List all calendars the account has access to. Identifies the 'primary' one.",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "calendar_list_events",
+        calendar.list_events,
+        "calendar.read",
+        "Events in a date range. time_min/time_max accept 'YYYY-MM-DD' or RFC3339; default = today through next 7 days. Optional `query` filters by text in title/description/location.",
+        {
+            "type": "object",
+            "properties": {
+                "time_min": {"type": "string", "description": "Default: now. Format 'YYYY-MM-DD' or RFC3339."},
+                "time_max": {"type": "string", "description": "Default: +7 days."},
+                "calendar_id": {"type": "string", "description": "Default 'primary'."},
+                "max_results": {"type": "integer", "description": "Default 50, max 250."},
+                "query": {"type": "string", "description": "Optional free-text filter."},
+            },
+        },
+    ),
+    _tool(
+        "calendar_get_event",
+        calendar.get_event,
+        "calendar.read",
+        "Full details of one event by id.",
+        {"type": "object", "properties": {"event_id": {"type": "string"}, "calendar_id": {"type": "string"}}, "required": ["event_id"]},
+    ),
+    _tool(
+        "calendar_create_event",
+        calendar.create_event,
+        "calendar.write",
+        "Create a new calendar event. start/end: 'YYYY-MM-DD' (all-day) or 'YYYY-MM-DD HH:MM' (timed, in `timezone_str`). end defaults to start + 1h for timed. reminder_minutes adds a popup; None = no reminder. Attendees auto-receive invites.",
+        {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "start": {"type": "string", "description": "'YYYY-MM-DD' (all-day) or 'YYYY-MM-DD HH:MM' (timed)."},
+                "end": {"type": "string", "description": "Optional. Same format as start."},
+                "description": {"type": "string"},
+                "location": {"type": "string"},
+                "attendees": {"type": "array", "items": {"type": "string"}, "description": "List of email addresses."},
+                "calendar_id": {"type": "string", "description": "Default 'primary'."},
+                "reminder_minutes": {"type": "integer", "description": "Minutes before event to popup (default 15). 0 = at start. null = no reminder."},
+                "timezone_str": {"type": "string", "description": "Default 'Europe/Moscow'."},
+            },
+            "required": ["summary", "start"],
+        },
+    ),
+    _tool(
+        "calendar_update_event",
+        calendar.update_event,
+        "calendar.write",
+        "Patch fields on an existing event. `updates` is a dict with any of: summary, description, location, start, end, attendees, reminders, status. For time fields use {date} or {dateTime, timeZone}.",
+        {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "updates": {"type": "object"},
+                "calendar_id": {"type": "string"},
+            },
+            "required": ["event_id", "updates"],
+        },
+    ),
+    _tool(
+        "calendar_delete_event",
+        calendar.delete_event,
+        "calendar.delete",
+        "Delete an event.",
+        {"type": "object", "properties": {"event_id": {"type": "string"}, "calendar_id": {"type": "string"}}, "required": ["event_id"]},
+    ),
+    _tool(
+        "calendar_find_free_time",
+        calendar.find_free_time,
+        "calendar.read",
+        "Find free slots of `duration_minutes` between work_hours_start..work_hours_end across a date range. Uses Calendar's free/busy. Returns up to 20 earliest slots. Use for 'когда у меня свободно' / 'найди время на встречу с Х'.",
+        {
+            "type": "object",
+            "properties": {
+                "start_date": {"type": "string", "description": "'YYYY-MM-DD'."},
+                "end_date": {"type": "string", "description": "'YYYY-MM-DD' (inclusive)."},
+                "duration_minutes": {"type": "integer", "description": "Default 60."},
+                "work_hours_start": {"type": "integer", "description": "Default 9."},
+                "work_hours_end": {"type": "integer", "description": "Default 19."},
+                "weekdays_only": {"type": "boolean", "description": "Default true (skip Sat/Sun)."},
+                "calendar_id": {"type": "string"},
+                "timezone_str": {"type": "string"},
+            },
+            "required": ["start_date", "end_date"],
+        },
+    ),
+    _tool(
+        "calendar_quick_reminder",
+        calendar.quick_reminder,
+        "calendar.write",
+        "Shortcut for 'напомни мне когда': creates a brief event at `when` with a popup reminder. Use for simple reminders like 'напомни мне в среду в 15:00 проверить ВБ-отчёт'. reminder_minutes=0 → popup at event start.",
+        {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "What to remind about (becomes event title)."},
+                "when": {"type": "string", "description": "'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD'."},
+                "reminder_minutes": {"type": "integer", "description": "Default 0 = popup at event start."},
+            },
+            "required": ["text", "when"],
+        },
     ),
     # --- Auth (multi-account) ---
     _tool(

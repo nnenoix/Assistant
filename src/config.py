@@ -23,6 +23,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/script.projects",      # read/write Apps Script source + versions
     "https://www.googleapis.com/auth/script.deployments",   # create/manage deployments
+    "https://www.googleapis.com/auth/calendar",             # events, free-busy, calendars list
+    "https://www.googleapis.com/auth/tasks",                # Google Tasks (todo lists, reminders)
 ]
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
