@@ -80,7 +80,14 @@ Emit = Callable[[dict], Awaitable[None]]
 
 
 # Friendly aliases the UI shows. Maps to actual model IDs the CLI/SDK understands.
+# 'auto' is a meta-alias — resolved per-turn by _classify_intent based on the
+# user's message. The resolved alias is what actually gets sent to the SDK.
 KNOWN_MODELS: dict[str, dict] = {
+    "auto": {
+        "id": None,
+        "label": "Auto",
+        "blurb": "Haiku на поиск файлов, Sonnet на анализ/код — выбор по тексту",
+    },
     "haiku": {
         "id": "claude-haiku-4-5",
         "label": "Haiku 4.5",
@@ -97,7 +104,53 @@ KNOWN_MODELS: dict[str, dict] = {
         "blurb": "самая умная, для сложной аналитики и кода",
     },
 }
-DEFAULT_MODEL_ALIAS = "sonnet"
+DEFAULT_MODEL_ALIAS = "auto"
+
+
+# Auto-routing classifier. Pure file-search → haiku; anything else → sonnet.
+# Bias is intentionally toward sonnet — Haiku fires only on obviously simple
+# discovery messages.
+import re as _re
+
+_ANALYSIS_PATTERNS = [
+    # Russian — leading \b dropped where common prefixes (про-, пере-, до-)
+    # would otherwise hide the match
+    r"анализ", r"почему\b", r"почини", r"почин[яе]", r"исправ",
+    r"напиши", r"создай", r"сделай(?! список)", r"постро[йи]",
+    r"посчита", r"сравни", r"выруч", r"ошибк", r"диагно",
+    r"скрипт", r"формул", r"редактир", r"править\b", r"правь\b",
+    r"отчёт", r"отчет", r"итог",
+    r"\bкод\b", r"\bапи\b", r"\bapps?[_\s]?script",
+    r"\bи (потом|после|затем)",
+    # English
+    r"\banalyz", r"\bwhy\b", r"\bfix\b",
+    r"\bwrite\b", r"\bbuild", r"\bcreate\b", r"\bcalculate", r"\bcompare",
+    r"\berror", r"\bdiagnose", r"\bcode\b", r"\breport", r"\bsum\b",
+    r"\band then\b", r"\bedit\b",
+]
+_DISCOVERY_PATTERNS = [
+    r"\bнайди\b", r"\bнайти\b", r"\bищи\b", r"\bпокажи\b", r"\bгде\b",
+    r"\bсписок\b", r"\bсвеж", r"\bпоследн(ие|ий|яя|их)",
+    r"\bfind\b", r"\bshow\b", r"\blist\b", r"\bwhere\b", r"\brecent\b",
+    r"\bкакие.*файл", r"\bесть\s+ли\b",
+]
+
+
+def classify_intent(message: str) -> str:
+    """Auto-mode: return 'haiku' for pure file-lookup messages, 'sonnet' otherwise."""
+    if not message:
+        return "sonnet"
+    text = message.lower().strip()
+    # Long messages are rarely pure search.
+    if len(text) > 240:
+        return "sonnet"
+    for pat in _ANALYSIS_PATTERNS:
+        if _re.search(pat, text):
+            return "sonnet"
+    for pat in _DISCOVERY_PATTERNS:
+        if _re.search(pat, text):
+            return "haiku"
+    return "sonnet"
 
 
 def _strip_mcp_prefix(tool_name: str) -> str:
@@ -116,22 +169,28 @@ class AgentSession:
         self._current_emit: Emit | None = None
         self._mcp_server = build_sdk_mcp_server()
         self._model_alias = model_alias if model_alias in KNOWN_MODELS else DEFAULT_MODEL_ALIAS
+        # Concrete alias used by the active SDK client. Differs from
+        # _model_alias when the user chose 'auto' — set per-turn.
+        self._active_alias: str | None = None
 
     @property
     def model_alias(self) -> str:
+        """User-facing alias (may be 'auto')."""
         return self._model_alias
 
     async def set_model(self, alias: str) -> None:
-        """Switch the model. Closes the current SDK session — next /chat
-        opens a fresh one with the new model. Conversation history doesn't
-        persist across the switch (SDK-side context resets).
+        """Switch the model preference. If switching invalidates the current
+        SDK session (different concrete model than what's open), closes it —
+        next /chat opens a fresh one. 'auto' is valid and defers per-turn.
         """
         if alias not in KNOWN_MODELS:
             raise ValueError(f"unknown model alias: {alias}")
         if alias == self._model_alias:
             return
         self._model_alias = alias
+        # In auto mode the active alias depends on next message — close to be safe.
         await self.close()
+        self._active_alias = None
 
     def resolve_approval(self, request_id: str, approved: bool) -> None:
         fut = self._pending_approvals.pop(request_id, None)
@@ -193,6 +252,7 @@ class AgentSession:
 
     async def _ensure_client(self) -> ClaudeSDKClient:
         if self._client is None:
+            assert self._active_alias is not None, "_active_alias must be set before _ensure_client"
             all_tools = [f"mcp__{MCP_SERVER_NAME}__{name}" for name in POLICY_OP_BY_TOOL]
             options = ClaudeAgentOptions(
                 mcp_servers={MCP_SERVER_NAME: self._mcp_server},
@@ -202,7 +262,7 @@ class AgentSession:
                 system_prompt=SYSTEM_PROMPT,
                 permission_mode="default",
                 setting_sources=[],
-                model=KNOWN_MODELS[self._model_alias]["id"],
+                model=KNOWN_MODELS[self._active_alias]["id"],
             )
             client = ClaudeSDKClient(options=options)
             await client.__aenter__()
@@ -211,6 +271,22 @@ class AgentSession:
 
     async def run_turn(self, user_message: str, emit: Emit) -> None:
         self._current_emit = emit
+
+        # Resolve concrete model for this turn (auto-mode picks per-message).
+        target_alias = (
+            classify_intent(user_message) if self._model_alias == "auto" else self._model_alias
+        )
+        if self._client is not None and self._active_alias != target_alias:
+            await self.close()
+        self._active_alias = target_alias
+
+        await emit({
+            "type": "model_used",
+            "alias": target_alias,
+            "label": KNOWN_MODELS[target_alias]["label"],
+            "preference": self._model_alias,
+        })
+
         client = await self._ensure_client()
 
         try:
