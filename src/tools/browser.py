@@ -167,6 +167,96 @@ def get_bound_script_id(
         pw.stop()
 
 
+def click_custom_menu(
+    spreadsheet_id: str,
+    menu_path: list[str],
+    headless: bool = True,
+    wait_after_click_sec: int = 0,
+    timeout_sec: int = 120,
+) -> dict:
+    """Open a spreadsheet and click through a custom menu chain. Used to
+    trigger bound-script functions that scripts.run can't reach (e.g. when
+    the script is in Google's default GCP project, not the caller's).
+
+    `menu_path` is the visible text of each menu item, top-down. The first
+    is a top-level menu (e.g. '☰ ВБ'), the rest are submenu items.
+
+    `wait_after_click_sec` keeps the page open after the final click, so the
+    bound script (which executes on the server) has time to run. Returns
+    {clicked_path, took_ms, browser_channel}.
+    """
+    SHEET_URL = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+    t0 = time.time()
+
+    pw, ctx, channel_used = _launch_persistent(headless=headless)
+    try:
+        page = ctx.new_page()
+        page.goto(SHEET_URL, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
+
+        deadline = time.time() + timeout_sec
+        while "accounts.google.com" in page.url and time.time() < deadline:
+            if headless:
+                raise RuntimeError("Not logged in — run login_interactive() first.")
+            page.wait_for_timeout(1000)
+        if "spreadsheets/d/" not in page.url:
+            raise RuntimeError(f"Did not land on spreadsheet (ended at {page.url}).")
+
+        page.wait_for_selector("#docs-menubars", timeout=30000)
+
+        # Wait for the FIRST menu_path item to appear (custom menus installed
+        # by onOpen take 5-15s on heavy scripts). Poll up to 30s.
+        first_label = menu_path[0]
+        deadline_menu = time.time() + 30
+        while time.time() < deadline_menu:
+            found = page.evaluate(
+                """(label) => Array.from(document.querySelectorAll('[role="menuitem"], [role="button"]'))
+                    .some(el => el.offsetParent !== null && (el.textContent || '').includes(label))""",
+                first_label,
+            )
+            if found:
+                break
+            page.wait_for_timeout(1000)
+        else:
+            raise RuntimeError(f"Custom menu {first_label!r} didn't appear within 30s of load")
+
+        for i, label in enumerate(menu_path):
+            info = page.evaluate(
+                """(label) => {
+                    const all = Array.from(document.querySelectorAll('[role="menuitem"], [role="button"]'));
+                    const target = all.find(el => el.offsetParent !== null
+                        && (el.textContent || '').includes(label));
+                    if (!target) return null;
+                    const r = target.getBoundingClientRect();
+                    return {x: r.x + r.width / 2, y: r.y + r.height / 2, text: target.textContent.trim()};
+                }""",
+                label,
+            )
+            if not info:
+                # Dump what IS visible for diagnostics
+                visible = page.evaluate("""() => Array.from(document.querySelectorAll('[role="menuitem"]'))
+                    .filter(el => el.offsetParent !== null)
+                    .map(el => (el.textContent||'').trim().substring(0, 40))""")
+                raise RuntimeError(f"Step {i+1}: no menu item contains {label!r}. Visible items: {visible[:20]}")
+            page.mouse.click(info["x"], info["y"])
+            page.wait_for_timeout(800)
+
+        # Keep page alive so server-side execution can run
+        if wait_after_click_sec > 0:
+            page.wait_for_timeout(wait_after_click_sec * 1000)
+
+        return {
+            "clicked_path": menu_path,
+            "took_ms": int((time.time() - t0) * 1000),
+            "browser_channel": channel_used,
+        }
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        pw.stop()
+
+
 def login_interactive(timeout_sec: int = 300) -> dict:
     """Open a visible Chromium window pointing to Google login. The user
     completes login once; profile is saved. Use BEFORE the first call to

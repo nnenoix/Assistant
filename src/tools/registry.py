@@ -518,6 +518,23 @@ TOOLS = [
         },
     ),
     _tool(
+        "browser_click_custom_menu",
+        browser.click_custom_menu,
+        "apps_script.run",
+        "Open a spreadsheet in a real browser and click through a custom menu chain (e.g. ['☰ WB', 'API', 'Фин.отчеты API']) to trigger a bound-script function. Use this when scripts.run via Apps Script API fails with 403/404 (typical when the bound script lives in Google's default GCP project, not the caller's). The function runs server-side after the click; `wait_after_click_sec` keeps the page open so it has time to execute. To verify completion, snapshot the spreadsheet's affected range before/after.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "menu_path": {"type": "array", "items": {"type": "string"}, "description": "Visible text of each menu item top-down. Substring matches OK (e.g. 'WB' matches '☰ WB')."},
+                "headless": {"type": "boolean", "default": True},
+                "wait_after_click_sec": {"type": "integer", "default": 0, "description": "Hold the browser tab open this many seconds after the final click so the function can finish (max Apps Script runtime is 6 min)."},
+                "timeout_sec": {"type": "integer", "default": 120},
+            },
+            "required": ["spreadsheet_id", "menu_path"],
+        },
+    ),
+    _tool(
         "browser_login_interactive",
         browser.login_interactive,
         "apps_script.edit",
