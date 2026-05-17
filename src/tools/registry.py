@@ -10,7 +10,7 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src.tools import apps_script, chats, drive, excel, gmail, local_fs, notes, people, sheets
+from src.tools import apps_script, chats, drive, excel, gmail, local_fs, macros, notes, people, sheets
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -350,6 +350,68 @@ TOOLS = [
                 "parent_folder_id": {"type": "string", "description": "Optional Drive folder to move the new spreadsheet into."},
             },
             "required": ["local_path"],
+        },
+    ),
+    _tool(
+        "sheets_query",
+        sheets.query,
+        "sheets.write",
+        "Run a Google QUERY against a range in a spreadsheet — SERVER-SIDE aggregation that scales to MILLIONS of rows. The 'sql' uses Google's QUERY language (SELECT/WHERE/GROUP BY/ORDER BY/LIMIT). Creates a temporary hidden sheet, computes, returns the rows, deletes the temp sheet. **Prefer this over reading raw data when the user asks 'сколько / сумма / по группам / топ'.** policy_op=sheets.write because it briefly mutates the file (hidden temp sheet, auto-cleaned).",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "source_range": {"type": "string", "description": "Range like 'Orders!A:M' or 'Orders' (whole sheet). First row is treated as headers."},
+                "sql": {"type": "string", "description": "QUERY language, e.g. 'SELECT A, SUM(C) WHERE B > 100 GROUP BY A ORDER BY SUM(C) DESC LIMIT 20'"},
+            },
+            "required": ["spreadsheet_id", "source_range", "sql"],
+        },
+    ),
+    _tool(
+        "sheets_profile",
+        sheets.profile,
+        "sheets.write",
+        "Column-by-column statistics for ONE sheet — runs server-side via formulas, doesn't fetch raw rows. Returns per column: name, non_blank, blank, distinct, type (numeric/text), top_5 values, plus min/max/avg for numeric. Use BEFORE reading raw data to understand the shape of unfamiliar / huge sheets. policy_op=sheets.write (temp sheet, auto-cleaned).",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "sheet": {"type": "string", "description": "Tab name."},
+            },
+            "required": ["spreadsheet_id", "sheet"],
+        },
+    ),
+    _tool(
+        "sheets_iter_rows",
+        sheets.iter_rows,
+        "sheets.read",
+        "Paginated read of a sheet — chunk_size rows starting at data row `offset` (0-based, excluding header). Returns {rows, offset, next_offset, has_more}. Use when you GENUINELY need per-row inspection of a huge sheet and a QUERY/PROFILE/SCRIPT approach won't work. Call repeatedly with next_offset until has_more=False. Default chunk_size=200; max 5000. Big chunks risk hitting the per-tool truncation cap.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "sheet": {"type": "string", "description": "Just the tab name (no '!' or range)."},
+                "offset": {"type": "integer", "description": "0-based data row offset (skip header automatically)."},
+                "chunk_size": {"type": "integer", "description": "Default 200, max 5000."},
+                "columns": {"type": "string", "description": "Column range, default 'A:ZZ'."},
+            },
+            "required": ["spreadsheet_id", "sheet"],
+        },
+    ),
+    _tool(
+        "apps_script_oneshot",
+        macros.apps_script_oneshot,
+        "apps_script.run",
+        "Run a one-off Apps Script function: creates a standalone script in the user's Drive, pushes the code, attempts to run it via clasp, returns the result. Use for ANY task too complex for QUERY/find_replace/iter_rows — full SpreadsheetApp / Drive API access from the server, can read multiple files, mutate them, return aggregates. First run may fail with 'not deployed' (Apps Script API-executable deployment is a one-time per-script setup); the response then contains script_url so the user can deploy manually.",
+        {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Full Apps Script source, must define a function named `function_name` (default 'main') with no required arguments."},
+                "function_name": {"type": "string", "description": "Default 'main'."},
+                "keep_project": {"type": "boolean", "description": "Default false. Set true to preserve the local clone for re-runs."},
+                "alias": {"type": "string", "description": "Optional alias for the project — useful when keep_project=true so you can re-run via apps_script_run."},
+            },
+            "required": ["code"],
         },
     ),
     # --- Apps Script ---

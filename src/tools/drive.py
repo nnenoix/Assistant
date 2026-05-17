@@ -131,20 +131,25 @@ def copy(file_id: str, new_name: str | None = None, parent_id: str | None = None
     ).execute()
 
 
-def search(name_contains: str, mime_type: str | None = None, account: str = DEFAULT_ACCOUNT) -> list[dict]:
+def search(name_contains: str, mime_type: str | None = None, page_size: int = 50, account: str = DEFAULT_ACCOUNT) -> list[dict]:
     """Search files by name across all files the account can see (own + shared).
     Optional `mime_type` filters by type — accepts both shortcuts ('spreadsheet',
     'doc', 'folder', 'pdf', etc.) and full Google mime strings.
+    Optional `page_size` (default 50, max 200) controls how many results to return.
     """
     safe = name_contains.replace("\\", "\\\\").replace("'", "\\'")
     q_parts = [f"name contains '{safe}'", "trashed = false"]
     if mime_type:
         mt = MIME_SHORTCUTS.get(mime_type.lower(), mime_type)
         q_parts.append(f"mimeType = '{mt}'")
+    try:
+        page_size_int = int(page_size)
+    except (ValueError, TypeError):
+        page_size_int = 50
     resp = _service(account).files().list(
         q=" and ".join(q_parts),
         fields="files(id,name,mimeType,modifiedTime,parents,owners(emailAddress))",
-        pageSize=50,
+        pageSize=min(max(page_size_int, 1), 200),
     ).execute()
     return resp.get("files", [])
 

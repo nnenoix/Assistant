@@ -19,6 +19,36 @@ def _service(account: str = DEFAULT_ACCOUNT):
     return build("sheets", "v4", credentials=get_credentials(account), cache_discovery=False)
 
 
+# Locales where Google Sheets uses ';' as function-argument separator.
+# Anywhere else (en_*, ja_JP, ko_KR, zh_CN, zh_TW, ...) uses ','.
+_SEMICOLON_LOCALE_PREFIXES = (
+    "ru", "uk", "be", "kk", "uz",  # Cyrillic
+    "de", "fr", "es", "it", "pt", "nl", "pl", "cs", "sk", "sl", "hr",
+    "ro", "hu", "fi", "sv", "no", "da", "et", "lv", "lt", "el", "bg",
+    "tr", "ar", "he",
+)
+
+
+@lru_cache(maxsize=64)
+def _arg_sep(spreadsheet_id: str, account: str) -> str:
+    """Return ';' for spreadsheets in European/Cyrillic locales, ',' for the rest.
+    Cached per (spreadsheet_id, account).
+    """
+    try:
+        loc = (
+            _service(account).spreadsheets()
+            .get(spreadsheetId=spreadsheet_id, fields="properties.locale")
+            .execute()
+            .get("properties", {})
+            .get("locale", "")
+            .lower()
+        )
+    except Exception:
+        return ","
+    prefix = loc.split("_")[0] if loc else ""
+    return ";" if prefix in _SEMICOLON_LOCALE_PREFIXES else ","
+
+
 def _snapshot(spreadsheet_id: str, range_a1: str, account: str, op: str) -> str | None:
     """Read the current values of `range_a1` and persist as a backup.
     Returns the snapshot id on success, None on any failure — snapshotting
@@ -381,6 +411,224 @@ def summarize(spreadsheet_id: str, sample_rows: int = 5, account: str = DEFAULT_
         })
 
     return out
+
+
+def query(spreadsheet_id: str, source_range: str, sql: str, account: str = DEFAULT_ACCOUNT) -> dict:
+    """Run a Google QUERY against a range in this spreadsheet — server-side
+    aggregation that scales to millions of rows. Creates a TEMPORARY sheet
+    inside the same file, writes the QUERY formula, reads the result, then
+    deletes the temp sheet.
+
+    `sql` uses Google's QUERY language: SELECT, WHERE, GROUP BY, ORDER BY,
+    LIMIT. Columns are addressed positionally as Col1, Col2, ... or by letter
+    A, B, ... depending on whether source_range has a header. We use header=1
+    (treat first row of source_range as header).
+    """
+    svc = _service(account)
+    ts = datetime.now().strftime("%H%M%S%f")[:-3]
+    temp_name = f"_agent_q_{ts}"
+
+    add_resp = svc.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{"addSheet": {"properties": {"title": temp_name, "hidden": True}}}]},
+    ).execute()
+    temp_sheet_id = add_resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    try:
+        sep = _arg_sep(spreadsheet_id, account)
+        escaped_sql = sql.replace('"', '""')
+        formula = f'=QUERY({source_range}{sep} "{escaped_sql}"{sep} 1)'
+        svc.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{temp_name}'!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[formula]]},
+        ).execute()
+
+        resp = svc.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{temp_name}'!A1:ZZ10000",
+        ).execute()
+        values = resp.get("values", []) or []
+        # trim trailing empty rows / cols
+        while values and not any(c not in (None, "") for c in (values[-1] or [])):
+            values.pop()
+
+        if values and values[0] and isinstance(values[0][0], str) and values[0][0].startswith("#"):
+            return {"error": "; ".join(str(c) for c in values[0] if c), "rows": [], "row_count": 0}
+
+        return {"rows": values, "row_count": len(values)}
+    finally:
+        try:
+            svc.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [{"deleteSheet": {"sheetId": temp_sheet_id}}]},
+            ).execute()
+        except Exception:
+            pass
+
+
+def profile(spreadsheet_id: str, sheet: str, account: str = DEFAULT_ACCOUNT) -> dict:
+    """Column-by-column statistics for a sheet — uses Google formulas so it
+    runs on the server regardless of file size. Returns per column:
+    name, non_blank, blank, distinct, top_5 (most frequent values), and for
+    numeric columns also min/max/avg/sum. NO raw row data is fetched.
+    """
+    svc = _service(account)
+
+    # Read just the header + 5 rows to detect numeric columns
+    sample = svc.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=f"'{sheet}'!A1:ZZ6",
+    ).execute().get("values", []) or []
+    if not sample:
+        return {"sheet": sheet, "columns": []}
+    headers = sample[0]
+    n_cols = len(headers)
+
+    def col_letter(i: int) -> str:
+        s = ""
+        n = i
+        while True:
+            s = chr(ord("A") + n % 26) + s
+            n = n // 26 - 1
+            if n < 0:
+                return s
+
+    # Detect numeric: any non-empty value in first 5 data rows that looks numeric
+    def is_numeric(idx: int) -> bool:
+        for r in sample[1:]:
+            if idx < len(r) and r[idx] not in (None, ""):
+                v = str(r[idx]).replace(",", ".").replace(" ", "").replace("\xa0", "")
+                try:
+                    float(v); return True
+                except ValueError:
+                    return False
+        return False
+
+    ts = datetime.now().strftime("%H%M%S%f")[:-3]
+    temp_name = f"_agent_p_{ts}"
+    add_resp = svc.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{"addSheet": {"properties": {"title": temp_name, "hidden": True}}}]},
+    ).execute()
+    temp_sheet_id = add_resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+    try:
+        sep = _arg_sep(spreadsheet_id, account)
+        out_values: list[list] = [[None] * n_cols for _ in range(13)]
+        numeric_flags = []
+        for i in range(n_cols):
+            letter = col_letter(i)
+            full = f"'{sheet}'!{letter}2:{letter}"
+            numeric = is_numeric(i)
+            numeric_flags.append(numeric)
+
+            out_values[0][i] = headers[i] or letter
+            out_values[1][i] = f"=COUNTA({full})"
+            out_values[2][i] = f"=COUNTBLANK({full})"
+            out_values[3][i] = f"=COUNTUNIQUE({full})"
+            out_values[4][i] = "numeric" if numeric else "text"
+            if numeric:
+                out_values[5][i] = f"=IFERROR(MIN({full}){sep})"
+                out_values[6][i] = f"=IFERROR(MAX({full}){sep})"
+                out_values[7][i] = f"=IFERROR(AVERAGE({full}){sep})"
+            # Top 5 via QUERY — value+count joined into one cell
+            out_values[8][i] = (
+                f'=IFERROR(JOIN(" | "{sep} QUERY({full}{sep} '
+                f'"SELECT {letter}, COUNT({letter}) WHERE {letter} IS NOT NULL '
+                f'GROUP BY {letter} ORDER BY COUNT({letter}) DESC LIMIT 5 LABEL {letter} \'\', '
+                f'COUNT({letter}) \'\'"{sep} 0)){sep})'
+            )
+
+        svc.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{temp_name}'!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": out_values},
+        ).execute()
+
+        # Read back
+        last_col = col_letter(max(0, n_cols - 1))
+        result = svc.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{temp_name}'!A1:{last_col}13",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("values", [])
+
+        # Stitch into per-column dict
+        def cell(r, c):
+            row = result[r] if r < len(result) else []
+            return row[c] if c < len(row) else None
+
+        cols_out = []
+        for i in range(n_cols):
+            entry = {
+                "name": cell(0, i),
+                "non_blank": cell(1, i),
+                "blank": cell(2, i),
+                "distinct": cell(3, i),
+                "type": cell(4, i),
+                "top_5": cell(8, i),
+            }
+            if numeric_flags[i]:
+                entry["min"] = cell(5, i)
+                entry["max"] = cell(6, i)
+                entry["avg"] = cell(7, i)
+            cols_out.append(entry)
+        return {"sheet": sheet, "columns": cols_out}
+    finally:
+        try:
+            svc.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [{"deleteSheet": {"sheetId": temp_sheet_id}}]},
+            ).execute()
+        except Exception:
+            pass
+
+
+def iter_rows(
+    spreadsheet_id: str,
+    sheet: str,
+    offset: int = 0,
+    chunk_size: int = 200,
+    columns: str = "A:ZZ",
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Read `chunk_size` rows of `columns` starting AT 0-based `offset` (data
+    row offset — header is at row 1 if any; offset=0 means start of data).
+    Returns {rows, offset, next_offset, has_more}. Use for paged traversal
+    of huge sheets when you genuinely need per-row inspection.
+
+    Pair with offset feedback loop: call with offset=0, then offset=next_offset
+    until has_more=False.
+    """
+    if "!" in sheet or ":" in sheet:
+        raise ValueError("`sheet` must be just the tab name, not a range")
+    cs = max(1, min(chunk_size, 5000))
+    start = offset + 2  # +1 because rows are 1-indexed, +1 to skip header
+    end = start + cs - 1
+    # columns "A:ZZ" → "A{start}:ZZ{end}"
+    if ":" in columns:
+        left, right = columns.split(":")
+        cell_range = f"{left}{start}:{right}{end}"
+    else:
+        cell_range = f"{columns}{start}:{columns}{end}"
+
+    resp = _service(account).spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{sheet}'!{cell_range}",
+    ).execute()
+    rows = resp.get("values", []) or []
+
+    has_more = len(rows) >= cs
+    next_offset = offset + len(rows) if has_more else None
+    return {
+        "offset": offset,
+        "rows": rows,
+        "row_count": len(rows),
+        "next_offset": next_offset,
+        "has_more": has_more,
+    }
 
 
 def find_in_spreadsheet(
