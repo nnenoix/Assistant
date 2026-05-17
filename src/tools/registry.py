@@ -10,7 +10,7 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src.tools import apps_script, apps_script_api, calendar, chats, drive, excel, gmail, local_fs, macros, notes, people, sheets
+from src.tools import apps_script, apps_script_api, browser, calendar, chats, drive, excel, gmail, local_fs, macros, notes, people, sheets
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -491,11 +491,42 @@ TOOLS = [
         "apps_script_api_resolve_bound_script",
         apps_script_api.resolve_bound_script,
         "apps_script.edit",
-        "Resolve `spreadsheet_id` to its bound Apps Script ID. Checks local registry first, falls back to Drive enumeration. Returns {script_id, source, account}. Raises with registration guidance if not found.",
+        "Resolve `spreadsheet_id` to its bound Apps Script ID. Checks: (1) local registry, (2) Drive enumeration (Google's API doesn't expose bound scripts but kept for completeness), (3) Playwright browser automation that clicks Extensions→Apps Script in a real browser and reads the new tab's URL. Each successful discovery is cached in the registry so subsequent calls are instant. Returns {script_id, source, account}.",
         {
             "type": "object",
-            "properties": {"spreadsheet_id": {"type": "string"}},
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "use_browser": {"type": "boolean", "default": True, "description": "Whether to fall back to Playwright if registry/enumeration fail. Disable for tests."},
+            },
             "required": ["spreadsheet_id"],
+        },
+    ),
+    # --- Browser automation (Playwright) ---
+    _tool(
+        "browser_get_bound_script_id",
+        browser.get_bound_script_id,
+        "apps_script.edit",
+        "Open a spreadsheet in a real browser, click Extensions → Apps Script, capture the bound script's ID from the new tab's URL. This is the only reliable way — Drive/Apps Script/Drive Activity APIs all refuse to enumerate bound scripts. Persistent Chromium profile lives in `.data/browser_profile/`. First call should be `headless=False` so the user can log in to Google once; thereafter `headless=True` works. Returns {script_id, final_url, took_ms, browser_channel}. The caller normally goes through apps_script_api_resolve_bound_script which auto-caches the result.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "headless": {"type": "boolean", "default": True, "description": "False shows a visible browser window — needed for first-time login. True runs invisibly after the profile is logged in."},
+                "timeout_sec": {"type": "integer", "default": 120},
+            },
+            "required": ["spreadsheet_id"],
+        },
+    ),
+    _tool(
+        "browser_login_interactive",
+        browser.login_interactive,
+        "apps_script.edit",
+        "Open a visible Chromium window pointing to Google login. The user completes login once; the persistent profile (`.data/browser_profile/`) saves it. Use this BEFORE calling browser_get_bound_script_id with headless=True, or whenever the saved session expires (you'll see a 'Not logged in' error).",
+        {
+            "type": "object",
+            "properties": {
+                "timeout_sec": {"type": "integer", "default": 300},
+            },
         },
     ),
     _tool(

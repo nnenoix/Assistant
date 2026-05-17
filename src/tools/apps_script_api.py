@@ -456,11 +456,18 @@ def list_bound_scripts() -> dict:
 def resolve_bound_script(
     spreadsheet_id: str,
     account: str = DEFAULT_ACCOUNT,
+    use_browser: bool = True,
 ) -> dict:
-    """Resolve a spreadsheet to its bound script. Checks the local registry
-    first (instant), then falls back to Drive enumeration. Returns
-    {script_id, source} where source is 'registry' or 'enumeration'.
-    Raises ValueError with guidance if nothing found.
+    """Resolve a spreadsheet to its bound script. Order of attempts:
+      1. Local registry (instant; cached from prior calls)
+      2. Drive enumeration via find_bound_script (rarely works — Drive API
+         doesn't expose bound scripts, but kept in case Google changes its mind)
+      3. Browser automation via Playwright (clicks Extensions → Apps Script
+         in a real browser, reads the new tab's URL). Requires the browser
+         profile to be logged in to Google.
+
+    Returns {script_id, source, account} where source ∈ {registry, enumeration,
+    browser}. Raises ValueError with guidance if everything fails.
     """
     reg = _bound_registry_load()
     if spreadsheet_id in reg:
@@ -469,16 +476,29 @@ def resolve_bound_script(
 
     bound = find_bound_script(spreadsheet_id, account=account)
     if bound:
-        # Auto-register what we found
-        register_bound_script(spreadsheet_id, bound[0]["script_id"], account=account, notes="auto-discovered")
+        register_bound_script(spreadsheet_id, bound[0]["script_id"], account=account, notes="auto-discovered (drive enum)")
         return {"script_id": bound[0]["script_id"], "source": "enumeration", "account": account}
+
+    if use_browser:
+        try:
+            from src.tools import browser as _browser
+            r = _browser.get_bound_script_id(spreadsheet_id, headless=True, timeout_sec=60)
+            register_bound_script(spreadsheet_id, r["script_id"], account=account, notes="auto-discovered (playwright)")
+            return {"script_id": r["script_id"], "source": "browser", "account": account}
+        except Exception as e:
+            raise ValueError(
+                f"No bound script known for spreadsheet {spreadsheet_id}. Drive's API doesn't expose "
+                f"bound scripts; Playwright fallback failed: {e}. Either run "
+                f"src.tools.browser.login_interactive() to log in the browser profile, "
+                f"or call apps_script_api_register_bound_script(spreadsheet_id='{spreadsheet_id}', script_id=...) "
+                f"once after copying the ID from the Apps Script editor URL."
+            )
 
     raise ValueError(
         f"No bound script known for spreadsheet {spreadsheet_id}. Drive's API doesn't expose "
-        f"bound scripts via enumeration — once you have the script ID (from the Apps Script "
-        f"editor URL: script.google.com/d/<SCRIPT_ID>/edit), register it via "
-        f"apps_script_api_register_bound_script(spreadsheet_id='{spreadsheet_id}', script_id=...). "
-        f"Subsequent calls resolve instantly."
+        f"bound scripts. Either enable use_browser=True, or call "
+        f"apps_script_api_register_bound_script(spreadsheet_id='{spreadsheet_id}', script_id=...) "
+        f"once after copying the ID from the Apps Script editor URL."
     )
 
 
