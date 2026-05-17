@@ -672,3 +672,102 @@ def find_in_spreadsheet(
                         "value": val,
                     })
     return matches
+
+
+def last_data_row(
+    spreadsheet_id: str,
+    sheet: str,
+    column: str = "A",
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Find the last non-empty row in `column` of `sheet`. Useful because
+    sheets_summarize().grid.rows is the SHEET DIMENSION (often inflated with
+    blank trailing rows), not the actual data extent.
+
+    Returns {last_row, value, sheet, column}. last_row=0 means column is empty.
+    """
+    svc = _service(account)
+    rng = f"{sheet}!{column}1:{column}"
+    resp = svc.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=rng,
+        majorDimension="ROWS",
+    ).execute()
+    vals = resp.get("values", [])
+    last_row = 0
+    last_value = None
+    for i, row in enumerate(vals, 1):
+        if row and row[0] != "":
+            last_row = i
+            last_value = row[0]
+    return {
+        "sheet": sheet,
+        "column": column,
+        "last_row": last_row,
+        "value": last_value,
+        "total_rows_scanned": len(vals),
+    }
+
+
+def snapshot_range(
+    spreadsheet_id: str,
+    range: str,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Take a structural snapshot of `range`: every cell value + last-row
+    indicator. Cheap (one read) — keep it in memory or pass between operations.
+    Returns {range, values, rows, cols, taken_at}.
+
+    Pair with sheets_diff_snapshot(before, after) to see what changed after
+    a write or external execution.
+    """
+    import datetime as _dt
+    values = read_range(spreadsheet_id, range, account=account)
+    rows = len(values)
+    cols = max((len(r) for r in values), default=0)
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "range": range,
+        "values": values,
+        "rows": rows,
+        "cols": cols,
+        "taken_at": _dt.datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def diff_snapshot(before: dict, after: dict, max_examples: int = 10) -> dict:
+    """Compare two snapshot_range() results. Returns {rows_added, rows_removed,
+    cells_changed, examples}. Doesn't try to be a full diff library — just
+    surfaces enough to verify "did the script write what we expected".
+    """
+    before_vals = before.get("values", []) or []
+    after_vals = after.get("values", []) or []
+    rows_added = max(0, len(after_vals) - len(before_vals))
+    rows_removed = max(0, len(before_vals) - len(after_vals))
+    cells_changed = 0
+    examples = []
+    for i in range(min(len(before_vals), len(after_vals))):
+        b_row = before_vals[i] if i < len(before_vals) else []
+        a_row = after_vals[i] if i < len(after_vals) else []
+        for j in range(max(len(b_row), len(a_row))):
+            b = b_row[j] if j < len(b_row) else ""
+            a = a_row[j] if j < len(a_row) else ""
+            if str(b) != str(a):
+                cells_changed += 1
+                if len(examples) < max_examples:
+                    examples.append({"row": i + 1, "col": j + 1, "before": b, "after": a})
+    # Sample new tail rows
+    new_tail = []
+    if rows_added:
+        for i in range(len(before_vals), len(after_vals)):
+            if len(new_tail) >= max_examples:
+                break
+            new_tail.append({"row": i + 1, "values": after_vals[i]})
+    return {
+        "before_rows": len(before_vals),
+        "after_rows": len(after_vals),
+        "rows_added": rows_added,
+        "rows_removed": rows_removed,
+        "cells_changed": cells_changed,
+        "diff_examples": examples,
+        "new_tail_rows": new_tail,
+    }

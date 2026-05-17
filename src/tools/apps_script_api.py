@@ -12,6 +12,7 @@ Requires OAuth scopes:
 added will fail with invalid_scope on first call — re-OAuth that account
 via /accounts UI or `uv run python -m src.cli add <alias>`.
 """
+import json
 from functools import lru_cache
 from typing import Any
 
@@ -163,6 +164,163 @@ def run_ad_hoc(
         except Exception:
             result["cleanup_failed"] = True
     return result
+
+
+def run_smart(
+    script_id: str | None = None,
+    function_name: str = "main",
+    params: list | None = None,
+    spreadsheet_id: str | None = None,
+    custom_menu_path: list[str] | None = None,
+    account: str = DEFAULT_ACCOUNT,
+    wait_after_menu_sec: int = 300,
+) -> dict:
+    """Cascade: scripts.run dev → scripts.run pinned → Playwright menu click.
+    Designed to "just run this function" regardless of GCP project alignment.
+
+    `script_id` runs scripts.run directly. If 403/404 (typical GCP project
+    mismatch for bound scripts), falls back to spreadsheet + custom menu via
+    Playwright. Provide at least one of (script_id, spreadsheet_id).
+
+    Returns {ok, result | error, path_taken}.
+    """
+    attempts: list[dict] = []
+
+    # Attempt 1: scripts.run dev mode (HEAD code)
+    if script_id:
+        try:
+            r = run_function(script_id, function_name, params=params, dev_mode=True, account=account)
+            if r.get("ok"):
+                return {**r, "path_taken": "scripts.run dev"}
+            attempts.append({"step": "scripts.run dev", "ok": False, "err": r.get("error_message")})
+        except Exception as e:
+            attempts.append({"step": "scripts.run dev", "err": str(e)[:200]})
+
+        # Attempt 2: scripts.run with pinned deployment
+        try:
+            v = create_version(script_id, description="run_smart", account=account)
+            create_deployment(script_id, v["versionNumber"], description="run_smart", account=account)
+            r = run_function(script_id, function_name, params=params, dev_mode=False, account=account)
+            if r.get("ok"):
+                return {**r, "path_taken": "scripts.run pinned"}
+            attempts.append({"step": "scripts.run pinned", "ok": False, "err": r.get("error_message")})
+        except Exception as e:
+            attempts.append({"step": "scripts.run pinned", "err": str(e)[:200]})
+
+    # Attempt 3: Playwright menu click on the spreadsheet
+    if spreadsheet_id and custom_menu_path:
+        try:
+            from src.tools import browser as _browser
+            r = _browser.click_custom_menu(
+                spreadsheet_id=spreadsheet_id,
+                menu_path=custom_menu_path,
+                headless=True,
+                wait_after_click_sec=wait_after_menu_sec,
+                timeout_sec=180,
+            )
+            return {"ok": True, "path_taken": "playwright menu", "click_info": r}
+        except Exception as e:
+            attempts.append({"step": "playwright menu", "err": str(e)[:200]})
+
+    return {"ok": False, "attempts": attempts, "hint": "Provide custom_menu_path+spreadsheet_id for Playwright fallback"}
+
+
+def triggers_install_one_shot(
+    script_id: str,
+    function_name: str,
+    delay_minutes: int = 1,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Install a one-shot CLOCK trigger that runs `function_name` after
+    `delay_minutes`. Uses scripts.run to install since Apps Script API has no
+    direct trigger API. The script must have executionApi.access set + GCP
+    projects aligned.
+
+    Returns {triggered_function, fires_at_iso, ok}.
+    """
+    import datetime as _dt
+    fire_at = (_dt.datetime.utcnow() + _dt.timedelta(minutes=delay_minutes)).isoformat() + "Z"
+    install_code = f"""function __install_oneshot() {{
+        ScriptApp.newTrigger("{function_name}")
+            .timeBased()
+            .after({delay_minutes * 60 * 1000})
+            .create();
+        return {{installed: true, function: "{function_name}", fires_in_min: {delay_minutes}}};
+    }}"""
+    # Push the install function, run it, then we leave it (harmless)
+    try:
+        edit_file(
+            script_id=script_id,
+            file_name="__OneShotInstaller",
+            new_source=install_code,
+            file_type="SERVER_JS",
+            account=account,
+        )
+        r = run_function(script_id, "__install_oneshot", dev_mode=True, account=account)
+        return {
+            "ok": r.get("ok"),
+            "triggered_function": function_name,
+            "fires_at_iso": fire_at,
+            "result": r.get("result") if r.get("ok") else r.get("error_message"),
+        }
+    except Exception as e:
+        return {"ok": False, "triggered_function": function_name,
+                "error": f"{type(e).__name__}: {str(e)[:200]}",
+                "hint": "Likely GCP project mismatch — use browser_set_script_gcp_project first"}
+
+
+def triggers_list(script_id: str, account: str = DEFAULT_ACCOUNT) -> dict:
+    """List all installed triggers on `script_id`. Pushes a tiny enumerator
+    function, runs it, returns the list. Requires executionApi + GCP alignment.
+    """
+    code = """function __list_triggers() {
+        return ScriptApp.getProjectTriggers().map(function(t) {
+            return {
+                id: t.getUniqueId(),
+                function: t.getHandlerFunction(),
+                event_type: String(t.getEventType()),
+                source: String(t.getTriggerSource())
+            };
+        });
+    }"""
+    try:
+        edit_file(script_id=script_id, file_name="__TriggerLister", new_source=code, file_type="SERVER_JS", account=account)
+        r = run_function(script_id, "__list_triggers", dev_mode=True, account=account)
+        return {"ok": r.get("ok"), "triggers": r.get("result", []) if r.get("ok") else None, "error": r.get("error_message")}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}",
+                "hint": "Likely GCP project mismatch — use browser_set_script_gcp_project first"}
+
+
+def triggers_remove(script_id: str, trigger_id: str | None = None, function_name: str | None = None,
+                    account: str = DEFAULT_ACCOUNT) -> dict:
+    """Remove triggers by ID or by handler function name. Returns
+    {removed_count}.
+    """
+    code = f"""function __remove_triggers() {{
+        var removed = 0;
+        ScriptApp.getProjectTriggers().forEach(function(t) {{
+            var match = {('t.getUniqueId() === ' + json.dumps(trigger_id) if trigger_id else 'false')}
+                     || {('t.getHandlerFunction() === ' + json.dumps(function_name) if function_name else 'false')};
+            if (match) {{ ScriptApp.deleteTrigger(t); removed++; }}
+        }});
+        return {{removed_count: removed}};
+    }}"""
+    # NB the above f-string is fragile — use simpler inline body
+    code = (
+        "function __remove_triggers() {\n"
+        "  var removed = 0;\n"
+        "  ScriptApp.getProjectTriggers().forEach(function(t) {\n"
+        + (f"    if (t.getUniqueId() === {json.dumps(trigger_id)}) {{ ScriptApp.deleteTrigger(t); removed++; return; }}\n" if trigger_id else "")
+        + (f"    if (t.getHandlerFunction() === {json.dumps(function_name)}) {{ ScriptApp.deleteTrigger(t); removed++; }}\n" if function_name else "")
+        + "  });\n  return {removed_count: removed};\n}\n"
+    )
+    try:
+        edit_file(script_id=script_id, file_name="__TriggerRemover", new_source=code, file_type="SERVER_JS", account=account)
+        r = run_function(script_id, "__remove_triggers", dev_mode=True, account=account)
+        return {"ok": r.get("ok"), "result": r.get("result") if r.get("ok") else r.get("error_message")}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
 def create_deployment(

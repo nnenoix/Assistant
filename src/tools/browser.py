@@ -19,11 +19,24 @@ from pathlib import Path
 from src.config import DATA_DIR
 
 
+BROWSER_PROFILES_ROOT = DATA_DIR / "browser_profiles"
+BROWSER_PROFILES_ROOT.mkdir(exist_ok=True)
+# Backward-compat: old single-profile dir
 BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"
 BROWSER_PROFILE_DIR.mkdir(exist_ok=True)
 
 
-def _launch_persistent(headless: bool):
+def _profile_dir(profile: str = "default") -> Path:
+    """Get the persistent profile directory for `profile` name. 'default'
+    points to the legacy .data/browser_profile/ for backward compat."""
+    if profile == "default":
+        return BROWSER_PROFILE_DIR
+    p = BROWSER_PROFILES_ROOT / profile
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _launch_persistent(headless: bool, profile: str = "default"):
     """Lazy import — Playwright loads ~80MB into memory.
 
     Tries channels in order: Edge (always on Windows) → Chrome (likely on
@@ -33,7 +46,7 @@ def _launch_persistent(headless: bool):
     from playwright.sync_api import sync_playwright
     pw = sync_playwright().start()
     common_kwargs = dict(
-        user_data_dir=str(BROWSER_PROFILE_DIR),
+        user_data_dir=str(_profile_dir(profile)),
         headless=headless,
         viewport={"width": 1280, "height": 800},
         args=[
@@ -60,6 +73,7 @@ def get_bound_script_id(
     spreadsheet_id: str,
     headless: bool = True,
     timeout_sec: int = 120,
+    profile: str = "default",
 ) -> dict:
     """Open the spreadsheet in a real browser, click Extensions → Apps Script,
     capture the script_id from the new tab's URL. Drive/Apps Script APIs don't
@@ -74,7 +88,7 @@ def get_bound_script_id(
     SHEET_URL = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
     t0 = time.time()
 
-    pw, ctx, channel_used = _launch_persistent(headless=headless)
+    pw, ctx, channel_used = _launch_persistent(headless=headless, profile=profile)
     try:
         page = ctx.new_page()
         page.goto(SHEET_URL, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
@@ -173,6 +187,7 @@ def click_custom_menu(
     headless: bool = True,
     wait_after_click_sec: int = 0,
     timeout_sec: int = 120,
+    profile: str = "default",
 ) -> dict:
     """Open a spreadsheet and click through a custom menu chain. Used to
     trigger bound-script functions that scripts.run can't reach (e.g. when
@@ -188,7 +203,7 @@ def click_custom_menu(
     SHEET_URL = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
     t0 = time.time()
 
-    pw, ctx, channel_used = _launch_persistent(headless=headless)
+    pw, ctx, channel_used = _launch_persistent(headless=headless, profile=profile)
     try:
         page = ctx.new_page()
         page.goto(SHEET_URL, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
@@ -257,13 +272,13 @@ def click_custom_menu(
         pw.stop()
 
 
-def login_interactive(timeout_sec: int = 300) -> dict:
+def login_interactive(timeout_sec: int = 300, profile: str = "default") -> dict:
     """Open a visible Chromium window pointing to Google login. The user
     completes login once; profile is saved. Use BEFORE the first call to
     get_bound_script_id, or whenever the saved session expires.
     """
     t0 = time.time()
-    pw, ctx = _launch_persistent(headless=False)
+    pw, ctx, _ = _launch_persistent(headless=False, profile=profile)
     try:
         page = ctx.new_page()
         page.goto("https://accounts.google.com/")
@@ -274,9 +289,96 @@ def login_interactive(timeout_sec: int = 300) -> dict:
             url = page.url
             # After login, Google bounces to https://myaccount.google.com/ or similar
             if "myaccount.google.com" in url or "/u/0/" in url:
-                return {"logged_in": True, "took_ms": int((time.time() - t0) * 1000)}
+                return {"logged_in": True, "profile": profile, "took_ms": int((time.time() - t0) * 1000)}
             page.wait_for_timeout(1000)
-        return {"logged_in": False, "reason": "timeout"}
+        return {"logged_in": False, "profile": profile, "reason": "timeout"}
     finally:
         ctx.close()
+        pw.stop()
+
+
+def list_profiles() -> dict:
+    """List existing browser profiles. Returns {default: <path>, named: [...]}.
+    Each profile is an independent persistent Chromium profile, allowing
+    different Google accounts in different sessions.
+    """
+    named = [p.name for p in BROWSER_PROFILES_ROOT.iterdir() if p.is_dir()] if BROWSER_PROFILES_ROOT.exists() else []
+    return {
+        "default": str(BROWSER_PROFILE_DIR) if BROWSER_PROFILE_DIR.exists() else None,
+        "named": sorted(named),
+    }
+
+
+def set_script_gcp_project(
+    script_id: str,
+    project_number: str,
+    headless: bool = False,
+    profile: str = "default",
+    timeout_sec: int = 120,
+) -> dict:
+    """Switch an Apps Script project's associated GCP project to
+    `project_number`. Required to make scripts.run work on bound scripts —
+    their default (hidden) GCP project blocks API calls from our OAuth client.
+
+    Settings page: script.google.com/d/<id>/edit → ⚙ Project Settings →
+    Google Cloud Platform (GCP) Project → Change project → enter number.
+
+    Returns {ok, project_number, took_ms}. Headless False recommended on
+    first run so you can confirm the new project is shown after switching.
+    """
+    SETTINGS_URL = f"https://script.google.com/u/0/home/projects/{script_id}/settings"
+    t0 = time.time()
+    pw, ctx, channel_used = _launch_persistent(headless=headless, profile=profile)
+    try:
+        page = ctx.new_page()
+        page.goto(SETTINGS_URL, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
+        page.wait_for_timeout(3000)
+
+        if "accounts.google.com" in page.url:
+            raise RuntimeError("Not logged in — call browser_login_interactive first.")
+
+        # The "Change project" button in the GCP section. Text varies (RU/EN).
+        # We find any button containing the project-number input afterwards.
+        clicked = False
+        for label in ("Изменить проект", "Change project"):
+            try:
+                page.get_by_text(label, exact=False).first.click(timeout=3000)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            raise RuntimeError("Could not find 'Change project' button")
+
+        page.wait_for_timeout(1500)
+        # Modal opens with a text input for the project number
+        page.locator("input[type=text]").first.fill(str(project_number))
+        page.wait_for_timeout(500)
+        # Click "Set project" / "Задать проект"
+        confirmed = False
+        for label in ("Задать проект", "Set project", "Установить"):
+            try:
+                page.get_by_text(label, exact=False).first.click(timeout=3000)
+                confirmed = True
+                break
+            except Exception:
+                continue
+        if not confirmed:
+            raise RuntimeError("Could not find 'Set project' confirmation button")
+
+        page.wait_for_timeout(3000)
+        return {
+            "ok": True,
+            "script_id": script_id,
+            "project_number": project_number,
+            "took_ms": int((time.time() - t0) * 1000),
+            "browser_channel": channel_used,
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
         pw.stop()

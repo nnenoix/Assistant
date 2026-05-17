@@ -10,7 +10,8 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src.tools import apps_script, apps_script_api, browser, calendar, chats, drive, excel, gmail, local_fs, macros, notes, people, sheets
+from src import auth as _auth
+from src.tools import apps_script, apps_script_api, browser, calendar, chats, cloud_logging, drive, excel, gcp, gmail, local_fs, macros, notes, people, sheets, wb
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -947,6 +948,270 @@ TOOLS = [
             "type": "object",
             "properties": {"account": {"type": "string"}},
             "required": ["account"],
+        },
+    ),
+    _tool(
+        "auth_describe_account",
+        _auth.describe_account,
+        "auth.list",
+        "Identify which Google account is bound to a token alias. Returns {email, name, scopes}. Use after auth_add_account to verify the consent screen picked the right account (we've been burned by accidentally picking the wrong one).",
+        {"type": "object", "properties": {"account": {"type": "string", "default": "main"}}},
+    ),
+    _tool(
+        "auth_list_accounts_with_identity",
+        _auth.list_accounts_with_identity,
+        "auth.list",
+        "Like auth_list_accounts but also fetches each alias's bound email + name. One-stop 'who is what'.",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "auth_add_account_incremental",
+        _auth.add_account_incremental,
+        "auth.add",
+        "Re-authorize an account adding NEW scopes while preserving existing grants (Google's incremental authorization with include_granted_scopes=true). Cleaner than delete+re-add — the user only sees the new scopes in the consent screen.",
+        {
+            "type": "object",
+            "properties": {
+                "account": {"type": "string"},
+                "new_scopes": {"type": "array", "items": {"type": "string"}, "description": "Scope URLs to add."},
+            },
+            "required": ["account"],
+        },
+    ),
+    # --- WB (Wildberries) direct API ---
+    _tool(
+        "wb_check_token",
+        wb.check_token,
+        "drive.read",  # No external write — read-only ping of WB API families
+        "Ping every Wildberries API family (content/analytics/statistics/advert/marketplace/common) with `token`. Returns {family: {code, status}}. Use to verify a token has the expected access scopes BEFORE running a long fetch.",
+        {"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]},
+    ),
+    _tool(
+        "wb_token_age",
+        wb.token_age,
+        "drive.read",
+        "Decode a WB JWT (no signature verification, just claims) and return issued_at/expires_at/days_left/seller_id. Use to warn the user when a token is close to expiry.",
+        {"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]},
+    ),
+    _tool(
+        "wb_finance_detail_collect",
+        wb.finance_detail_collect,
+        "drive.read",
+        "Fetch WB reportDetailByPeriod for [date_from..date_to] with the given token. Paginated by rrd_id, 65-sec pause between pages (WB rate-limit: 1 req/min), honors X-Ratelimit-Retry on 429. Returns {rows_count, last_rrd_id, pages, sample_first, sample_last}. WB rate limit is strict — if a recent run consumed the budget, this will raise immediately rather than risk a 12h ban.",
+        {
+            "type": "object",
+            "properties": {
+                "token": {"type": "string"},
+                "date_from": {"type": "string", "description": "YYYY-MM-DD"},
+                "date_to": {"type": "string", "description": "YYYY-MM-DD, defaults to today UTC"},
+                "limit": {"type": "integer", "default": 10000},
+                "start_rrd_id": {"type": "integer", "default": 0},
+                "sleep_sec": {"type": "integer", "default": 65, "description": "Pause between pages."},
+                "max_pages": {"type": "integer", "description": "Stop after N pages — useful for testing."},
+            },
+            "required": ["token", "date_from"],
+        },
+    ),
+    # --- Sheets helpers ---
+    _tool(
+        "sheets_last_data_row",
+        sheets.last_data_row,
+        "sheets.read",
+        "Find the last non-empty row in a column. Unlike summarize().grid.rows (which is sheet DIMENSION, often inflated), this is the actual data extent.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "sheet": {"type": "string"},
+                "column": {"type": "string", "default": "A"},
+            },
+            "required": ["spreadsheet_id", "sheet"],
+        },
+    ),
+    _tool(
+        "sheets_snapshot_range",
+        sheets.snapshot_range,
+        "sheets.read",
+        "Take a structural snapshot of a sheet range (all values + dimensions). Cheap, one read. Pair with sheets_diff_snapshot(before, after) to verify what a script wrote.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "range": {"type": "string"},
+            },
+            "required": ["spreadsheet_id", "range"],
+        },
+    ),
+    _tool(
+        "sheets_diff_snapshot",
+        sheets.diff_snapshot,
+        "sheets.read",
+        "Compare two sheets_snapshot_range() results. Returns {rows_added, rows_removed, cells_changed, diff_examples, new_tail_rows}.",
+        {
+            "type": "object",
+            "properties": {
+                "before": {"type": "object"},
+                "after": {"type": "object"},
+                "max_examples": {"type": "integer", "default": 10},
+            },
+            "required": ["before", "after"],
+        },
+    ),
+    # --- Apps Script: smart-run + triggers ---
+    _tool(
+        "apps_script_api_run_smart",
+        apps_script_api.run_smart,
+        "apps_script.run",
+        "Cascade run: tries scripts.run dev → scripts.run pinned → Playwright custom-menu click. Use when the script is bound to a spreadsheet whose GCP project might not match ours. Pass custom_menu_path (e.g. ['☰ WB', 'API', 'Фин.отчеты']) to enable the menu fallback.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "function_name": {"type": "string", "default": "main"},
+                "params": {"type": "array"},
+                "spreadsheet_id": {"type": "string", "description": "For Playwright menu fallback"},
+                "custom_menu_path": {"type": "array", "items": {"type": "string"}},
+                "wait_after_menu_sec": {"type": "integer", "default": 300},
+            },
+        },
+    ),
+    _tool(
+        "apps_script_api_triggers_install_one_shot",
+        apps_script_api.triggers_install_one_shot,
+        "apps_script.run",
+        "Install a one-shot CLOCK trigger that fires `function_name` after `delay_minutes`. Useful for scheduling work that must run later (e.g. retry after a WB rate-limit window). Requires GCP project alignment (use browser_set_script_gcp_project if needed).",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "function_name": {"type": "string"},
+                "delay_minutes": {"type": "integer", "default": 1},
+            },
+            "required": ["script_id", "function_name"],
+        },
+    ),
+    _tool(
+        "apps_script_api_triggers_list",
+        apps_script_api.triggers_list,
+        "apps_script.run",
+        "List installed triggers on a script. Returns [{id, function, event_type, source}].",
+        {
+            "type": "object",
+            "properties": {"script_id": {"type": "string"}},
+            "required": ["script_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_triggers_remove",
+        apps_script_api.triggers_remove,
+        "apps_script.edit",
+        "Remove triggers by ID or handler function name. Returns {removed_count}.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "trigger_id": {"type": "string"},
+                "function_name": {"type": "string"},
+            },
+            "required": ["script_id"],
+        },
+    ),
+    # --- Browser: profiles + GCP project switcher ---
+    _tool(
+        "browser_list_profiles",
+        browser.list_profiles,
+        "apps_script.edit",
+        "List browser profiles configured. Each profile is an independent persistent Chromium profile, allowing different Google accounts to be logged in for different sessions.",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "browser_set_script_gcp_project",
+        browser.set_script_gcp_project,
+        "apps_script.edit",
+        "Switch an Apps Script project's GCP project to `project_number` (e.g. our OAuth client's project 148389149001). Needed for scripts.run / Cloud Logging / triggers to work on bound scripts that default to Google's hidden GCP project. Does it via Playwright clicking Project Settings → Change project.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "project_number": {"type": "string"},
+                "headless": {"type": "boolean", "default": False, "description": "Visible first time so you can confirm the change."},
+                "profile": {"type": "string", "default": "default"},
+            },
+            "required": ["script_id", "project_number"],
+        },
+    ),
+    # --- GCP API enable + project listing ---
+    _tool(
+        "gcp_enable_api",
+        gcp.enable_api,
+        "apps_script.edit",
+        "Enable a Google Cloud API in our GCP project via Service Usage API — no Cloud Console click needed. `api_name` is the hostname, e.g. 'driveactivity.googleapis.com', 'logging.googleapis.com', 'script.googleapis.com', 'sheets.googleapis.com'. Idempotent.",
+        {
+            "type": "object",
+            "properties": {
+                "api_name": {"type": "string"},
+                "project_number": {"type": "string", "default": "148389149001"},
+            },
+            "required": ["api_name"],
+        },
+    ),
+    _tool(
+        "gcp_list_enabled_apis",
+        gcp.list_enabled_apis,
+        "apps_script.edit",
+        "List all APIs enabled in our GCP project. Returns {count, apis: [...]}.",
+        {
+            "type": "object",
+            "properties": {"project_number": {"type": "string", "default": "148389149001"}},
+        },
+    ),
+    _tool(
+        "gcp_list_projects",
+        gcp.list_projects,
+        "apps_script.edit",
+        "List all GCP projects the calling account has access to. Returns [{project_id, project_number, name, state}].",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "gcp_project_number",
+        gcp.project_number,
+        "apps_script.edit",
+        "Look up the numeric project_number for a project_id. Handy when you only remember the human-readable id but need the number for browser_set_script_gcp_project.",
+        {
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+        },
+    ),
+    # --- Cloud Logging — read Apps Script execution logs ---
+    _tool(
+        "cloud_logging_read",
+        cloud_logging.read_logs,
+        "apps_script.edit",
+        "Read recent Cloud Logging entries with an optional advanced filter. Use this to fetch Apps Script Logger.log output without scraping the editor UI. Common filter: 'resource.type=\"app_script_function\" AND resource.labels.script_id=\"<id>\"'. Defaults to last 60 minutes.",
+        {
+            "type": "object",
+            "properties": {
+                "filter_expr": {"type": "string", "description": "Cloud Logging filter; omit for all entries."},
+                "project_id": {"type": "string", "default": "148389149001"},
+                "minutes_back": {"type": "integer", "default": 60},
+                "page_size": {"type": "integer", "default": 100},
+            },
+        },
+    ),
+    _tool(
+        "cloud_logging_script_executions",
+        cloud_logging.script_executions,
+        "apps_script.edit",
+        "List recent function executions for a specific Apps Script. Returns one entry per execution_id with status + start time + log count. Requires the script to be linked to our GCP project (use browser_set_script_gcp_project first).",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "minutes_back": {"type": "integer", "default": 60},
+                "project_id": {"type": "string", "default": "148389149001"},
+            },
+            "required": ["script_id"],
         },
     ),
     # --- Chat history (search your own past conversations) ---

@@ -25,6 +25,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/script.deployments",   # create/manage deployments
     "https://www.googleapis.com/auth/script.scriptapp",     # scripts.run via Apps Script API
     "https://www.googleapis.com/auth/drive.activity.readonly",  # discover bound-script IDs via activity log
+    "https://www.googleapis.com/auth/cloud-platform",       # GCP API enable, Cloud Logging, project list
     "https://www.googleapis.com/auth/calendar",             # events, free-busy, calendars list
     "https://www.googleapis.com/auth/tasks",                # Google Tasks (todo lists, reminders)
 ]
