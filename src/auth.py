@@ -67,8 +67,23 @@ def get_credentials(account: str = "main") -> Credentials:
 
 
 def add_account(account: str) -> dict:
-    """Run the OAuth flow and save the token under `account`. Opens a browser on this machine."""
+    """Run the OAuth flow and save the token under `account`. Opens a browser on this machine.
+
+    If the browser doesn't open automatically (e.g. default handler missing on
+    Windows), the auth URL is printed to stdout so the user can paste it.
+    """
+    import sys as _sys
     flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
-    creds = flow.run_local_server(port=0)
+    # success_message is shown to the browser; authorization_prompt_message is
+    # printed to stdout — make the latter loud so the user spots it.
+    creds = flow.run_local_server(
+        port=0,
+        open_browser=True,
+        authorization_prompt_message=(
+            "\n>>> If a browser window did NOT open, copy this URL manually:\n{url}\n"
+        ),
+        success_message="Auth complete — you can close this tab.",
+    )
+    _sys.stdout.flush()
     _token_path(account).write_text(creds.to_json())
     return {"account": account, "saved_to": str(_token_path(account))}

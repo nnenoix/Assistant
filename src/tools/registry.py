@@ -452,6 +452,53 @@ TOOLS = [
         },
     ),
     _tool(
+        "apps_script_api_get_bound_script_token",
+        apps_script_api.get_bound_script_token,
+        "apps_script.edit",
+        "Extract an API token (e.g. WB / Wildberries) from the bound Apps Script of `spreadsheet_id`. Convention: bound script has `function getToken() { return \"<token>\"; }`. Returns {token, script_id, file_name, function_name}. Uses apps_script_api_resolve_bound_script under the hood — if the spreadsheet isn't registered yet, the error will tell you to register it first via apps_script_api_register_bound_script.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "function_name": {"type": "string", "default": "getToken"},
+            },
+            "required": ["spreadsheet_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_register_bound_script",
+        apps_script_api.register_bound_script,
+        "apps_script.edit",
+        "Teach the agent which Apps Script (`script_id`) is bound to a spreadsheet (`spreadsheet_id`). Drive's API doesn't expose bound scripts via enumeration, so the agent needs this mapping recorded once per spreadsheet. Get the script_id from the Apps Script editor URL: `script.google.com/d/<SCRIPT_ID>/edit`. After registration, apps_script_api_get_bound_script_token and apps_script_api_resolve_bound_script work instantly.",
+        {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {"type": "string"},
+                "script_id": {"type": "string"},
+                "notes": {"type": "string", "default": "", "description": "Optional human description of what this script does."},
+            },
+            "required": ["spreadsheet_id", "script_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_list_bound_scripts",
+        apps_script_api.list_bound_scripts,
+        "apps_script.edit",
+        "List all spreadsheet→script mappings the agent has learned. Use to check if a spreadsheet is already registered before asking the user for the script_id.",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "apps_script_api_resolve_bound_script",
+        apps_script_api.resolve_bound_script,
+        "apps_script.edit",
+        "Resolve `spreadsheet_id` to its bound Apps Script ID. Checks local registry first, falls back to Drive enumeration. Returns {script_id, source, account}. Raises with registration guidance if not found.",
+        {
+            "type": "object",
+            "properties": {"spreadsheet_id": {"type": "string"}},
+            "required": ["spreadsheet_id"],
+        },
+    ),
+    _tool(
         "apps_script_api_find_bound_script",
         apps_script_api.find_bound_script,
         "apps_script.edit",
@@ -558,6 +605,70 @@ TOOLS = [
             "type": "object",
             "properties": {"script_id": {"type": "string"}},
             "required": ["script_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_create_project",
+        apps_script_api.create_project,
+        "apps_script.edit",
+        "Create a fresh standalone Apps Script project owned by `account`. Returns {scriptId, title, ...}. Use this for ad-hoc test/runner scripts — then push files via apps_script_api_edit_file. Set parent_id to bind the script to a Drive folder/spreadsheet.",
+        {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "parent_id": {"type": "string", "description": "Optional Drive ID — if set, script is bound to it (e.g. a spreadsheet)."},
+            },
+            "required": ["title"],
+        },
+    ),
+    _tool(
+        "apps_script_api_create_deployment",
+        apps_script_api.create_deployment,
+        "apps_script.edit",
+        "Create an API-executable deployment of the script pinned to a version_number. Needed for apps_script_api_run_function with dev_mode=False (pinned code). For testing latest code, use dev_mode=True and skip deployment entirely.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "version_number": {"type": "integer"},
+                "description": {"type": "string", "default": "API exec"},
+            },
+            "required": ["script_id", "version_number"],
+        },
+    ),
+    _tool(
+        "apps_script_api_run_ad_hoc",
+        apps_script_api.run_ad_hoc,
+        "apps_script.run",
+        "ONE-SHOT: create a temp script, push code, run it, return result, delete the project. Best for testing library functions or ad-hoc 'what does this return' checks. Manifest is auto-built with executionApi.access=MYSELF. If library_id+library_version are set, the library is wired up at `library_symbol` (default 'Mylib'). Returns {ok, result | error_*, script_id, script_url}. Set keep_project=True to retain the script for inspection.",
+        {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Full Apps Script source — must define `function_name`."},
+                "function_name": {"type": "string", "default": "main"},
+                "params": {"type": "array", "description": "Positional args passed to the function."},
+                "library_id": {"type": "string", "description": "Optional. Apps Script library script ID to attach as dependency."},
+                "library_version": {"type": "integer", "description": "Library version pinned in manifest."},
+                "library_symbol": {"type": "string", "default": "Mylib", "description": "Symbol the library is exposed as inside the script."},
+                "keep_project": {"type": "boolean", "default": False},
+            },
+            "required": ["code"],
+        },
+    ),
+    _tool(
+        "apps_script_api_run_function",
+        apps_script_api.run_function,
+        "apps_script.run",
+        "Run a function in an Apps Script project via the API. Returns {ok, result | error_type+error_message+stack}. The script's appsscript.json must have `executionApi.access` (e.g. \"MYSELF\"). Pass arguments via `params` (list, JSON-serializable). dev_mode=True runs HEAD code without needing a deployment (most common for testing); dev_mode=False runs the pinned API-exec deployment.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "function_name": {"type": "string"},
+                "params": {"type": "array", "description": "Positional arguments. JSON-serializable values. Empty/omitted for no-arg functions."},
+                "dev_mode": {"type": "boolean", "default": True, "description": "True = run HEAD code, False = run pinned API-exec deployment."},
+            },
+            "required": ["script_id", "function_name"],
         },
     ),
     # --- Apps Script ---

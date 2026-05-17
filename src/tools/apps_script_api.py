@@ -28,6 +28,163 @@ def _service(account: str = DEFAULT_ACCOUNT):
     return build("script", "v1", credentials=get_credentials(account), cache_discovery=False)
 
 
+def create_project(
+    title: str,
+    parent_id: str | None = None,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Create a new standalone Apps Script project. Returns {scriptId, title,
+    createTime, ...}. If `parent_id` is a Drive folder/spreadsheet ID, the
+    script is created as bound to it. Owner is `account`.
+
+    Use this for ad-hoc test scripts when you need to run code with a specific
+    library dependency or just call something via the Apps Script API. After
+    create, push files with update_content / edit_file.
+    """
+    body: dict[str, Any] = {"title": title}
+    if parent_id is not None:
+        body["parentId"] = parent_id
+    return _service(account).projects().create(body=body).execute()
+
+
+def run_function(
+    script_id: str,
+    function_name: str,
+    params: list | None = None,
+    dev_mode: bool = True,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Run an Apps Script function via the Apps Script API and return its
+    result. The script must have `executionApi.access` set in appsscript.json
+    (e.g. {"executionApi": {"access": "MYSELF"}}) and the calling account must
+    be the owner/editor.
+
+    `dev_mode=True` runs HEAD code (latest source) without a deployment —
+    convenient for testing. `dev_mode=False` runs the API-exec deployment's
+    pinned version (create one via create_deployment first).
+
+    Returns a normalized dict:
+      - {ok: True, result: <return value>} on success
+      - {ok: False, error_type, error_message, stack: [{function, line}, ...]} on script error
+    Both forms include `raw` with the full API response for debugging.
+
+    Requires scope: https://www.googleapis.com/auth/script.scriptapp
+    """
+    svc = _service(account)
+    body: dict[str, Any] = {"function": function_name, "devMode": bool(dev_mode)}
+    if params is not None:
+        body["parameters"] = params
+    resp = svc.scripts().run(scriptId=script_id, body=body).execute()
+
+    if "error" in resp:
+        err = resp["error"]
+        details = err.get("details") or [{}]
+        d0 = details[0] if details else {}
+        return {
+            "ok": False,
+            "error_type": d0.get("errorType") or err.get("status"),
+            "error_message": d0.get("errorMessage") or err.get("message"),
+            "stack": d0.get("scriptStackTraceElements", []),
+            "raw": resp,
+        }
+    return {
+        "ok": True,
+        "result": (resp.get("response") or {}).get("result"),
+        "raw": resp,
+    }
+
+
+def run_ad_hoc(
+    code: str,
+    function_name: str = "main",
+    params: list | None = None,
+    library_id: str | None = None,
+    library_version: int | None = None,
+    library_symbol: str = "Mylib",
+    keep_project: bool = False,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """ONE-SHOT: create a temp Apps Script project, push code, run it, delete.
+    All under `account` — no clasp, no OAuth mixing.
+
+    The project's manifest is auto-built with executionApi.access=MYSELF so the
+    function is runnable. If `library_id` + `library_version` are given, the
+    library is wired up at `library_symbol` (default 'Mylib') — useful for
+    testing a library's exported functions.
+
+    Returns the same shape as run_function: {ok, result | error_type+...}
+    plus {script_id, script_url}. If keep_project=True, the script stays
+    in the account's Drive so you can inspect/run it again.
+
+    Use this for: testing a library function with real arguments, ad-hoc
+    poke-the-system scripts, "what does this WB token return" checks.
+    """
+    import json as _json
+
+    title = function_name + "-test-" + __import__("uuid").uuid4().hex[:6]
+    proj = create_project(title=title, account=account)
+    script_id = proj["scriptId"]
+
+    manifest: dict[str, Any] = {
+        "timeZone": "Etc/UTC",
+        "exceptionLogging": "STACKDRIVER",
+        "runtimeVersion": "V8",
+        "executionApi": {"access": "MYSELF"},
+    }
+    if library_id and library_version is not None:
+        manifest["dependencies"] = {
+            "libraries": [{
+                "libraryId": library_id,
+                "version": library_version,
+                "userSymbol": library_symbol,
+                "developmentMode": False,
+            }]
+        }
+
+    update_content(script_id, [
+        {"name": "appsscript", "type": "JSON", "source": _json.dumps(manifest, ensure_ascii=False, indent=2)},
+        {"name": "Code", "type": "SERVER_JS", "source": code},
+    ], account=account)
+
+    result = run_function(
+        script_id=script_id,
+        function_name=function_name,
+        params=params,
+        dev_mode=True,
+        account=account,
+    )
+    result["script_id"] = script_id
+    result["script_url"] = f"https://script.google.com/d/{script_id}/edit"
+
+    if not keep_project:
+        from src.tools import drive as _drive
+        try:
+            _drive.delete(script_id, account=account)
+        except Exception:
+            result["cleanup_failed"] = True
+    return result
+
+
+def create_deployment(
+    script_id: str,
+    version_number: int,
+    description: str = "API exec",
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Create an API-executable deployment pinned to a specific version.
+    Use this when you need `run_function` with `dev_mode=False` (i.e. pinned
+    code, not HEAD). For HEAD execution use dev_mode=True and skip this.
+    """
+    return _service(account).projects().deployments().create(
+        scriptId=script_id,
+        body={
+            "versionNumber": version_number,
+            "manifestFileName": "appsscript",
+            "description": description,
+        },
+    ).execute()
+
+
 def get_content(script_id: str, account: str = DEFAULT_ACCOUNT) -> dict:
     """Read all files in an Apps Script project. Returns
     {scriptId, files: [{name, type, source, lastModifyUser, ...}]}.
@@ -233,6 +390,154 @@ def find_bound_script(spreadsheet_id: str, account: str = DEFAULT_ACCOUNT) -> li
         except Exception:
             continue
     return matches
+
+
+_BOUND_REGISTRY_PATH = None  # lazy import to avoid circular
+
+
+def _bound_registry_path():
+    global _BOUND_REGISTRY_PATH
+    if _BOUND_REGISTRY_PATH is None:
+        from src.config import DATA_DIR
+        _BOUND_REGISTRY_PATH = DATA_DIR / "bound_scripts.json"
+    return _BOUND_REGISTRY_PATH
+
+
+def _bound_registry_load() -> dict[str, dict]:
+    import json as _json
+    p = _bound_registry_path()
+    if not p.exists():
+        return {}
+    try:
+        return _json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _bound_registry_save(data: dict) -> None:
+    import json as _json
+    p = _bound_registry_path()
+    p.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def register_bound_script(
+    spreadsheet_id: str,
+    script_id: str,
+    account: str = DEFAULT_ACCOUNT,
+    notes: str = "",
+) -> dict:
+    """Save a `spreadsheet_id → script_id` mapping so the agent can find the
+    bound script later without enumerating Drive (which doesn't expose bound
+    scripts). After one registration, get_bound_script_token resolves
+    instantly. Use this when the user shares the script's URL or ID for a
+    spreadsheet — typical workflow when first analyzing a new WB / finance
+    report.
+
+    Records: {spreadsheet_id: {script_id, account, registered_at, notes}}.
+    """
+    import datetime as _dt
+    reg = _bound_registry_load()
+    reg[spreadsheet_id] = {
+        "script_id": script_id,
+        "account": account,
+        "registered_at": _dt.datetime.utcnow().isoformat() + "Z",
+        "notes": notes,
+    }
+    _bound_registry_save(reg)
+    return {"spreadsheet_id": spreadsheet_id, "script_id": script_id, "registered": True}
+
+
+def list_bound_scripts() -> dict:
+    """List all known `spreadsheet_id → script_id` mappings. Useful for the
+    agent to recall which bound scripts it has been taught about."""
+    return _bound_registry_load()
+
+
+def resolve_bound_script(
+    spreadsheet_id: str,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Resolve a spreadsheet to its bound script. Checks the local registry
+    first (instant), then falls back to Drive enumeration. Returns
+    {script_id, source} where source is 'registry' or 'enumeration'.
+    Raises ValueError with guidance if nothing found.
+    """
+    reg = _bound_registry_load()
+    if spreadsheet_id in reg:
+        entry = reg[spreadsheet_id]
+        return {"script_id": entry["script_id"], "source": "registry", "account": entry.get("account", account)}
+
+    bound = find_bound_script(spreadsheet_id, account=account)
+    if bound:
+        # Auto-register what we found
+        register_bound_script(spreadsheet_id, bound[0]["script_id"], account=account, notes="auto-discovered")
+        return {"script_id": bound[0]["script_id"], "source": "enumeration", "account": account}
+
+    raise ValueError(
+        f"No bound script known for spreadsheet {spreadsheet_id}. Drive's API doesn't expose "
+        f"bound scripts via enumeration — once you have the script ID (from the Apps Script "
+        f"editor URL: script.google.com/d/<SCRIPT_ID>/edit), register it via "
+        f"apps_script_api_register_bound_script(spreadsheet_id='{spreadsheet_id}', script_id=...). "
+        f"Subsequent calls resolve instantly."
+    )
+
+
+def get_bound_script_token(
+    spreadsheet_id: str,
+    function_name: str = "getToken",
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Extract an API token from the Apps Script BOUND to `spreadsheet_id`.
+
+    Convention used in many WB / financial-report spreadsheets: the bound
+    script contains `function getToken() { return "<api-token>"; }` and every
+    other init function calls it. This tool resolves the bound script (via
+    registry or Drive enumeration), locates that function, and returns the
+    string literal it returns.
+
+    Returns {token, script_id, file_name, function_name}.
+    Raises if no bound script known (with hint to register one), no such
+    function, or the function body has no string-literal return (e.g. it pulls
+    from ScriptProperties — use apps_script_api_run_function for that).
+    """
+    import re
+
+    resolved = resolve_bound_script(spreadsheet_id, account=account)
+    script_id = resolved["script_id"]
+    # If registry told us a different account owns the script, use that
+    effective_account = resolved.get("account", account)
+    content = get_content(script_id, account=effective_account)
+
+    for f in content.get("files", []):
+        if f.get("type") != "SERVER_JS":
+            continue
+        src = f.get("source") or ""
+        start, end = _find_function_span(src, function_name)
+        if start is None:
+            continue
+        body = src[start:end]
+        m = re.search(r"""return\s+(["'`])((?:\\.|(?!\1).)*)\1""", body, re.DOTALL)
+        if m:
+            return {
+                "token": m.group(2),
+                "script_id": script_id,
+                "file_name": f.get("name"),
+                "function_name": function_name,
+                "bound_to_spreadsheet": spreadsheet_id,
+                "source": resolved.get("source"),
+            }
+        # Found function but no string-literal return
+        raise ValueError(
+            f"Function {function_name!r} in bound script {script_id} doesn't return a "
+            f"string literal — body starts:\n{body[:200]}\nUse apps_script_api_run_function "
+            f"to actually invoke it if the token is computed at runtime."
+        )
+
+    files = [f.get("name") for f in content.get("files", [])]
+    raise ValueError(
+        f"Function {function_name!r} not found in any file of bound script {script_id}. "
+        f"Files: {files}"
+    )
 
 
 def edit_file(
