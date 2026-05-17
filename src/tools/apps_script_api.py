@@ -260,3 +260,99 @@ def edit_file(
 
     update_content(script_id, files, account=account)
     return {"script_id": script_id, "file_name": file_name, "action": action, "bytes": len(new_source)}
+
+
+def _find_function_span(source: str, function_name: str) -> tuple[int | None, int | None]:
+    """Return (start, end) char offsets of the function in JS source, or
+    (None, None) if not found. Handles nested braces, strings, line comments,
+    block comments.
+    """
+    import re
+
+    m = re.search(rf"^\s*function\s+{re.escape(function_name)}\s*\(", source, re.MULTILINE)
+    if not m:
+        return None, None
+    start = m.start()
+    # Find opening brace
+    try:
+        i = source.index("{", m.end())
+    except ValueError:
+        return None, None
+    depth = 1
+    j = i + 1
+    in_mode: str | None = None  # "//"  "/*"  '"'  "'"  "`"
+    while j < len(source):
+        c = source[j]
+        if in_mode == "//":
+            if c == "\n":
+                in_mode = None
+        elif in_mode == "/*":
+            if c == "*" and j + 1 < len(source) and source[j + 1] == "/":
+                in_mode = None
+                j += 1
+        elif in_mode in ('"', "'", "`"):
+            if c == "\\" and j + 1 < len(source):
+                j += 1
+            elif c == in_mode:
+                in_mode = None
+        else:
+            if c == "/" and j + 1 < len(source):
+                nxt = source[j + 1]
+                if nxt == "/":
+                    in_mode = "//"
+                    j += 1
+                elif nxt == "*":
+                    in_mode = "/*"
+                    j += 1
+            elif c in ('"', "'", "`"):
+                in_mode = c
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return start, j + 1
+        j += 1
+    return start, len(source)  # unbalanced
+
+
+def replace_function(
+    script_id: str,
+    file_name: str,
+    function_name: str,
+    new_source: str,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Surgical edit: replace EXACTLY one function in a file, preserving
+    everything else (other functions, comments, whitespace, file order).
+    Walks JS braces to find the function span — safe with nested {} and
+    strings. Use this when fixing a bug in a multi-function file rather
+    than rewriting the whole file (which risks deleting unrelated code).
+    """
+    content = get_content(script_id, account=account)
+    target = next((f for f in content.get("files", []) if f.get("name") == file_name), None)
+    if target is None:
+        raise ValueError(f"file {file_name!r} not in project {script_id}")
+
+    src = target.get("source", "")
+    start, end = _find_function_span(src, function_name)
+    if start is None:
+        raise ValueError(f"function {function_name!r} not found in {file_name!r}")
+
+    # Ensure new_source has clean trailing newline structure
+    if not new_source.endswith("\n"):
+        new_source = new_source + "\n"
+    new_full = src[:start] + new_source + src[end:]
+
+    return edit_file(
+        script_id=script_id,
+        file_name=file_name,
+        new_source=new_full,
+        file_type=target.get("type", "SERVER_JS"),
+        account=account,
+    ) | {
+        "replaced_function": function_name,
+        "old_span": [start, end],
+        "old_bytes": end - start,
+        "new_bytes": len(new_source.encode("utf-8")),
+    }

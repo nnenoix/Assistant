@@ -466,7 +466,7 @@ TOOLS = [
         "apps_script_api_edit_file",
         apps_script_api.edit_file,
         "apps_script.edit",
-        "Replace ONE file's source in an Apps Script project (or add it if missing), preserving all other files. Account-aware push. Use this for surgical fixes to a specific .gs/.js file without touching the rest of the project.",
+        "Replace ONE file's WHOLE source in an Apps Script project (or add it if missing), preserving all other files. Use when the entire file is being rewritten and you have read all of its source. For surgical fixes to ONE function inside a multi-function file, prefer apps_script_api_replace_function — it's safer.",
         {
             "type": "object",
             "properties": {
@@ -476,6 +476,22 @@ TOOLS = [
                 "file_type": {"type": "string", "description": "SERVER_JS (default) / JSON / HTML."},
             },
             "required": ["script_id", "file_name", "new_source"],
+        },
+    ),
+    _tool(
+        "apps_script_api_replace_function",
+        apps_script_api.replace_function,
+        "apps_script.edit",
+        "Surgical edit: replace EXACTLY one function inside a file, preserving every other function, comment, and whitespace. Walks JS braces (handles nested {}, strings, comments) to find the function's span. Prefer this over edit_file when fixing a bug in a multi-function file — eliminates the risk of accidentally deleting other functions when the source got truncated during read.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "file_name": {"type": "string"},
+                "function_name": {"type": "string"},
+                "new_source": {"type": "string", "description": "Full text of the new function, starting with 'function NAME(...)' and ending with the closing '}'."},
+            },
+            "required": ["script_id", "file_name", "function_name", "new_source"],
         },
     ),
     _tool(
@@ -608,8 +624,16 @@ TOOLS = [
         "local_read_file",
         local_fs.read_file,
         "local.read",
-        "Read a local text file.",
-        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        "Read a local text file (UTF-8). Returns {content, total_lines, offset, returned_lines, has_more}. CHUNKED reading with offset+limit (both line-based, 0-indexed offset) — essential for files larger than ~12k chars where the tool output cap would truncate. Loop with offset=next_offset until has_more=False to traverse the whole file.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "description": "0-based line offset, default 0."},
+                "limit": {"type": "integer", "description": "Max lines to return. Omit for whole file (still subject to ~12k-char tool cap — use chunks for big files)."},
+            },
+            "required": ["path"],
+        },
     ),
     _tool(
         "local_write_file",
