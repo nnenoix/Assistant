@@ -10,7 +10,7 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src.tools import apps_script, chats, drive, excel, gmail, local_fs, macros, notes, people, sheets
+from src.tools import apps_script, apps_script_api, chats, drive, excel, gmail, local_fs, macros, notes, people, sheets
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -412,6 +412,100 @@ TOOLS = [
                 "alias": {"type": "string", "description": "Optional alias for the project — useful when keep_project=true so you can re-run via apps_script_run."},
             },
             "required": ["code"],
+        },
+    ),
+    # --- Apps Script API (direct, account-aware, no clasp) ---
+    _tool(
+        "apps_script_api_get_content",
+        apps_script_api.get_content,
+        "apps_script.edit",
+        "Read FULL source of an Apps Script project via the official API (not clasp). Returns {scriptId, files:[{name, type, source}]}. Works for any account where the configured OAuth token has script.projects scope and the user has at least Reader access. Type is SERVER_JS / JSON (for appsscript.json) / HTML.",
+        {
+            "type": "object",
+            "properties": {"script_id": {"type": "string"}},
+            "required": ["script_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_edit_file",
+        apps_script_api.edit_file,
+        "apps_script.edit",
+        "Replace ONE file's source in an Apps Script project (or add it if missing), preserving all other files. Account-aware push. Use this for surgical fixes to a specific .gs/.js file without touching the rest of the project.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "file_name": {"type": "string", "description": "Without extension. E.g. '2.3 Финансы с датой отчета' (not '...js')."},
+                "new_source": {"type": "string"},
+                "file_type": {"type": "string", "description": "SERVER_JS (default) / JSON / HTML."},
+            },
+            "required": ["script_id", "file_name", "new_source"],
+        },
+    ),
+    _tool(
+        "apps_script_api_update_content",
+        apps_script_api.update_content,
+        "apps_script.edit",
+        "Replace the FULL file set of an Apps Script project. Prefer apps_script_api_edit_file for single-file fixes; use this only when modifying multiple files at once. `files` is the complete list of {name, type, source}; any file you omit will be DELETED from the project.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["script_id", "files"],
+        },
+    ),
+    _tool(
+        "apps_script_api_create_version",
+        apps_script_api.create_version,
+        "apps_script.edit",
+        "Create a new VERSION of an Apps Script project — required for libraries: consumer scripts pin a versionNumber, code changes only become visible to them after a new version is created. Returns {scriptId, versionNumber, createTime, description}.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "description": {"type": "string", "description": "Free-text changelog for this version, shown in the script editor's Version manager."},
+            },
+            "required": ["script_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_list_versions",
+        apps_script_api.list_versions,
+        "apps_script.edit",
+        "List all versions of an Apps Script project. Useful before creating a new version (to know the next number) or to diagnose 'which version does the consumer pin?'.",
+        {
+            "type": "object",
+            "properties": {"script_id": {"type": "string"}},
+            "required": ["script_id"],
+        },
+    ),
+    _tool(
+        "apps_script_api_update_library_dependency",
+        apps_script_api.update_library_dependency,
+        "apps_script.edit",
+        "In CONSUMER script `consumer_script_id`, find the library with `library_script_id` in appsscript.json and set its version to `new_version`. If the library isn't listed yet, it's added. Use this in a library-deploy workflow AFTER apps_script_api_create_version: (1) edit library file, (2) create_version → get new versionNumber, (3) update_library_dependency on each consumer to pin the new version, (4) the consumer's next call sees fixed code.",
+        {
+            "type": "object",
+            "properties": {
+                "consumer_script_id": {"type": "string"},
+                "library_script_id": {"type": "string"},
+                "new_version": {"type": "integer"},
+                "user_symbol": {"type": "string", "description": "Optional. The alias the library is exposed as (e.g. 'Mylib'). Leave empty to preserve existing."},
+            },
+            "required": ["consumer_script_id", "library_script_id", "new_version"],
+        },
+    ),
+    _tool(
+        "apps_script_api_get_project",
+        apps_script_api.get_project,
+        "apps_script.edit",
+        "Project metadata: title, parentId (spreadsheet for bound scripts), owner, createTime.",
+        {
+            "type": "object",
+            "properties": {"script_id": {"type": "string"}},
+            "required": ["script_id"],
         },
     ),
     # --- Apps Script ---

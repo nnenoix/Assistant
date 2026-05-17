@@ -21,6 +21,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/script.projects",      # read/write Apps Script source + versions
+    "https://www.googleapis.com/auth/script.deployments",   # create/manage deployments
 ]
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
