@@ -11,7 +11,11 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
 from src import auth as _auth
-from src.tools import apps_script, apps_script_api, bank_parser, browser, calendar, chats, cloud_logging, drive, excel, gcp, gmail, local_fs, macros, notes, people, sheets, wb
+from src.tools import (
+    analytics, apps_script, apps_script_api, bank_parser, browser, calendar,
+    chats, cloud_logging, drive, excel, gcp, gmail, local_fs, macros, notes,
+    people, reports, sheets, wb,
+)
 from src.tools import bank_parser as _bank_parser  # alias
 
 
@@ -875,6 +879,115 @@ TOOLS = [
         "local.read",
         "List the bank ids the parser supports.",
         {"type": "object", "properties": {}},
+    ),
+    # --- Analytics (ABC) ---
+    _tool(
+        "analytics_abc",
+        analytics.abc_analysis,
+        "local.read",
+        "Full ABC analysis (80/15/5 split) on a list of row dicts. Groups by `sku_col`, sums revenue/qty/profit per SKU, computes ABC class for each of the 3 metrics (revenue/qty/profit), builds composite code (e.g. 'AAA'=leader, 'CCC'=cut). Returns {total_skus, total_revenue, categories, abc_rev_counts, top_a (15 best), rows (all sorted)}. Optional `costs` is [{sku, cost}] — if provided, computes final_profit = revenue - cost×qty. Ported from D:\\\\UniversalAnalytics.",
+        {
+            "type": "object",
+            "properties": {
+                "rows": {"type": "array", "description": "List of row dicts (e.g. from sheets_query or excel_parse). Must have sku, revenue, qty columns."},
+                "sku_col": {"type": "string", "default": "sku"},
+                "revenue_col": {"type": "string", "default": "revenue"},
+                "qty_col": {"type": "string", "default": "qty"},
+                "profit_col": {"type": "string", "default": "profit"},
+                "costs": {"type": "array", "description": "Optional [{sku, cost}] — purchase cost per SKU for final_profit calculation."},
+            },
+            "required": ["rows"],
+        },
+    ),
+    _tool(
+        "analytics_abc_split",
+        analytics.abc_split,
+        "local.read",
+        "Quick 1-metric ABC classification on rows. Sorts rows by `metric` desc, cumsum, assigns A (≤80%), B (≤95%), C (rest). Returns rows with new `abc` key. Use when you only need ABC on ONE metric (vs analytics_abc which does 3-metric composite).",
+        {
+            "type": "object",
+            "properties": {
+                "rows": {"type": "array"},
+                "metric": {"type": "string"},
+            },
+            "required": ["rows", "metric"],
+        },
+    ),
+    # --- Report storage (typed memory for structured data) ---
+    _tool(
+        "report_save",
+        reports.save_report,
+        "notes.write",
+        "Save a STRUCTURED report (rows, stats, parsed data) to disk. Lives in `.data/reports/<kind>/<name>.json`. Use `kind` to namespace (e.g. 'bank', 'abc', 'sales'). Unlike notes (free-form text), this is for typed data the agent will load back later. Returns {name, kind, path, bytes}. Typical use: after parsing a bank statement, save_report(name='varychev_alfa_dec_2025', kind='bank', data=transactions).",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Unique within the kind. Use kebab/snake case."},
+                "kind": {"type": "string", "description": "Namespace: 'bank', 'abc', 'sales', 'expenses', etc."},
+                "data": {"description": "JSON-serializable data — list of dicts or a dict."},
+                "metadata": {"type": "object", "description": "Optional context: source file, date range, account, etc."},
+            },
+            "required": ["name", "kind", "data"],
+        },
+    ),
+    _tool(
+        "report_load",
+        reports.load_report,
+        "notes.read",
+        "Load a saved report by name. Returns the full payload {name, kind, saved_at, metadata, data}. Pass `kind` to disambiguate if the same name exists in multiple kinds.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "kind": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+    ),
+    _tool(
+        "report_list",
+        reports.list_reports,
+        "notes.read",
+        "List all saved reports. Filter by kind if given. Returns [{name, kind, saved_at, bytes, metadata_keys}], newest first.",
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "limit": {"type": "integer", "default": 50},
+            },
+        },
+    ),
+    _tool(
+        "report_delete",
+        reports.delete_report,
+        "notes.write",
+        "Delete a saved report by name (optionally within a kind).",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "kind": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+    ),
+    _tool(
+        "report_combine",
+        reports.combine_reports,
+        "notes.write",
+        "Merge multiple saved reports into a single row set, keyed by `merge_key`. Rows with the same key across reports get their `sum_cols` summed (revenue, qty, amount_cents, etc.). Optional `save_as` persists the merged result as a new report. Use to combine: monthly bank statements → yearly view; multiple sales reports → consolidated SKU list; per-store data → company-wide totals. Returns {merged_count, sources, rows}.",
+        {
+            "type": "object",
+            "properties": {
+                "names": {"type": "array", "items": {"type": "string"}, "description": "Saved-report names to merge."},
+                "merge_key": {"type": "string", "description": "Column name to group by (e.g. 'sku', 'counterparty', 'date')."},
+                "sum_cols": {"type": "array", "items": {"type": "string"}, "description": "Numeric columns to sum across reports."},
+                "keep_first_cols": {"type": "array", "items": {"type": "string"}, "description": "Columns to keep value from first occurrence (default: all non-numeric)."},
+                "kind": {"type": "string", "description": "Optional: restrict source lookups to this kind."},
+                "save_as": {"type": "string", "description": "Optional name to save the merged result as a new report (kind='combined')."},
+            },
+            "required": ["names", "merge_key"],
+        },
     ),
     # --- Google Calendar ---
     _tool(

@@ -100,7 +100,16 @@ Rules:
    - Cross-reference: if a 2-letter code (e.g. `SA`) appears alongside a full-word name (e.g. `SensesAura`) in different file names, infer they're the same thing and report the readable name with the code in parens.
    - Only AFTER you've mapped the categorical structure should you open specific files to answer numeric/detail follow-ups. Do NOT answer "what brands does X have" from a single file's tab list — that file shows what's in THAT file, not the full set of brands.
 
-16. **User-attached files and folders (paths under .data/uploads/).** When the user attaches files via the chat UI, the message ends with an "[Attachments — local paths the user just shared:]" section listing the absolute paths. Pick the right tool by file kind:
+16. **Analytics — ABC classification + report storage.**
+    - `analytics_abc(rows, sku_col, revenue_col, qty_col, profit_col?)` runs the full 80/15/5 split on a row list (e.g. from `excel_parse`, `sheets_query`, `bank_parse_statement`'s transactions, or a combined report). Returns abc_rev/qty/profit + composite code (AAA = leader, CCC = drop, ACA = hidden gem). Use for "какие товары прибыльные / провальные", "топ артикулов".
+    - For one-metric ABC, use `analytics_abc_split(rows, metric)` — cheaper.
+    - **Persistent structured memory** (separate from `notes`, which is free-form text):
+      - `report_save(name, kind, data, metadata?)` — save typed data to `.data/reports/<kind>/<name>.json`. Use `kind` as a namespace ('bank', 'sales', 'expenses', 'abc'). After parsing any structured data, **save it under a descriptive name** so future turns can load it without re-parsing.
+      - `report_load(name)` / `report_list(kind?)` — recall.
+      - `report_combine(names, merge_key, sum_cols)` — **merge multiple reports** into one row set keyed by `merge_key`, numerical columns summed. Use to combine: monthly bank statements → yearly, per-store sales → company-wide, multiple analyses → consolidated. Optional `save_as` persists the merge.
+    Workflow example: parse 3 monthly bank statements → save_report each → combine_reports(merge_key='counterparty', sum_cols=['amount_cents']) → analytics_abc on the merged rows → save the analysis. Each step persists, so next time the user asks "топ контрагентов за квартал" — just `report_load`, skip parsing.
+
+17. **User-attached files and folders (paths under .data/uploads/).** When the user attaches files via the chat UI, the message ends with an "[Attachments — local paths the user just shared:]" section listing the absolute paths. Pick the right tool by file kind:
    - **Bank statement PDF** (Сбер, Альфа, Т-Банк, Газпром, ВТБ, Райф, Ozon, Modul, Точка, ЮниКредит, ВБ, или 1С client-bank .txt) → call `bank_detect` first to confirm the format, then `bank_parse_statement(file_path)` to extract transactions. Amounts are returned in КОПЕЙКАХ — multiply by 0.01 for ₽.
    - **Other PDF** (contract, receipt, scan with text layer) → `local_extract_pdf_text` with `pages=` to limit range.
    - **Image** (.png/.jpg/etc.) → `local_image_info` returns a data_url you can include directly in your reasoning (this model is multimodal). Use this for screenshots, photos of receipts, diagrams.
