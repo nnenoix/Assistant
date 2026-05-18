@@ -78,20 +78,31 @@ def _classify(message: str, severity: str) -> dict | None:
 
 
 def recent_failures(
-    script_id: str,
+    script_id: str | None = None,
     since_minutes: int = 60,
     account: str = "main",
+    function_filter: list[str] | None = None,
 ) -> dict:
-    """Detect failure-pattern Logger.log entries + structured errors for a
-    given Apps Script. Returns {script_id, since_minutes, failures: [...]}.
+    """Detect failure-pattern Logger.log entries + structured errors.
 
-    Each failure record:
-      {timestamp, function_name, execution_id, severity, kind, label, message}
+    Note (May 2026): Apps Script Cloud Logging no longer emits
+    `resource.labels.script_id` — only `function_name` + `project_id`. So
+    `script_id` is now used only as a label in the returned records; the
+    actual filter scans ALL Apps Script logs in our GCP project and
+    optionally narrows to specific function names.
+
+    Returns {script_id, since_minutes, failures: [...]}.
+    Each failure: {timestamp, function_name, execution_id, severity, kind,
+    label, message}.
     """
-    filter_expr = (
-        f'resource.type="app_script_function" AND '
-        f'resource.labels.script_id="{script_id}"'
-    )
+    # Build filter — function names if given, else all app_script_function logs
+    parts = ['resource.type="app_script_function"']
+    if function_filter:
+        clauses = " OR ".join(
+            f'resource.labels.function_name="{fn}"' for fn in function_filter
+        )
+        parts.append(f"({clauses})")
+    filter_expr = " AND ".join(parts)
     logs = cloud_logging.read_logs(
         filter_expr=filter_expr,
         minutes_back=since_minutes,
@@ -200,8 +211,12 @@ def poll_known_scripts(
     since_minutes: int = 30,
     account: str = "main",
 ) -> dict:
-    """Check all monitored scripts for new failures. Appends new ones (not
-    yet seen) to .data/alerts.json. Idempotent across calls.
+    """Scan ALL Apps Script logs in our GCP project for failures and append
+    new ones to .data/alerts.json. Idempotent.
+
+    Since Cloud Logging no longer emits `script_id` in labels, we do a single
+    project-wide scan and tag each alert with whatever info IS available
+    (function name + the first known-script's label as a best-effort hint).
 
     Returns {checked, new_alerts, total_failures_seen, alerts_added: [...]}.
     """
@@ -209,43 +224,47 @@ def poll_known_scripts(
     seen_set = set(seen)
     alerts = _load_json(ALERTS_PATH, [])
 
-    checked = 0
-    added: list[dict] = []
-    total_failures = 0
+    known = _known_scripts()
     errors: list[dict] = []
+    added: list[dict] = []
 
-    for script in _known_scripts():
-        checked += 1
-        sid = script["script_id"]
-        try:
-            r = recent_failures(sid, since_minutes=since_minutes, account=account)
-        except Exception as e:
-            errors.append({"script_id": sid, "error": f"{type(e).__name__}: {str(e)[:160]}"})
+    try:
+        r = recent_failures(since_minutes=since_minutes, account=account)
+    except Exception as e:
+        errors.append({"error": f"{type(e).__name__}: {str(e)[:160]}"})
+        return {
+            "checked_scripts": len(known),
+            "total_failures_seen": 0,
+            "new_alerts": 0,
+            "alerts_added": [],
+            "errors": errors,
+            "next_check_in_min": since_minutes,
+        }
+
+    for f in r["failures"]:
+        # No script_id in modern Apps Script logs — best-effort label by function
+        fname = f.get("function_name") or "?"
+        label = f"function {fname}"
+        aid = _alert_id(f, label)
+        if aid in seen_set:
             continue
+        seen_set.add(aid)
+        alert = {
+            "id": aid,
+            "created_at": _now_iso(),
+            "script_id": None,  # Cloud Logging doesn't expose it anymore
+            "script_label": label,
+            "function": fname,
+            "kind": f.get("kind"),
+            "severity": f.get("severity"),
+            "timestamp": f.get("timestamp"),
+            "preview": f.get("match_preview"),
+            "message": f.get("message"),
+            "read": False,
+        }
+        alerts.append(alert)
+        added.append(alert)
 
-        for f in r["failures"]:
-            total_failures += 1
-            aid = _alert_id(f, sid)
-            if aid in seen_set:
-                continue
-            seen_set.add(aid)
-            alert = {
-                "id": aid,
-                "created_at": _now_iso(),
-                "script_id": sid,
-                "script_label": script["label"],
-                "function": f.get("function_name"),
-                "kind": f.get("kind"),
-                "severity": f.get("severity"),
-                "timestamp": f.get("timestamp"),
-                "preview": f.get("match_preview"),
-                "message": f.get("message"),
-                "read": False,
-            }
-            alerts.append(alert)
-            added.append(alert)
-
-    # Keep last N alerts to avoid unbounded growth
     if len(alerts) > 500:
         alerts = sorted(alerts, key=lambda a: a.get("created_at",""), reverse=True)[:500]
 
@@ -253,8 +272,8 @@ def poll_known_scripts(
     _save_json(ALERTS_SEEN_PATH, list(seen_set))
 
     return {
-        "checked_scripts": checked,
-        "total_failures_seen": total_failures,
+        "checked_scripts": len(known),
+        "total_failures_seen": r["failures_count"],
         "new_alerts": len(added),
         "alerts_added": added,
         "errors": errors,
