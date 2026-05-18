@@ -337,10 +337,10 @@ def set_script_gcp_project(
         if "accounts.google.com" in page.url:
             raise RuntimeError("Not logged in — call browser_login_interactive first.")
 
-        # The "Change project" button in the GCP section. Text varies (RU/EN).
-        # We find any button containing the project-number input afterwards.
+        # Actual button text on the Apps Script settings page (May 2026):
+        # "Изменить тип проекта" (RU) / "Change project" (EN).
         clicked = False
-        for label in ("Изменить проект", "Change project"):
+        for label in ("Изменить тип проекта", "Change project", "Изменить проект"):
             try:
                 page.get_by_text(label, exact=False).first.click(timeout=3000)
                 clicked = True
@@ -348,25 +348,42 @@ def set_script_gcp_project(
             except Exception:
                 continue
         if not clicked:
-            raise RuntimeError("Could not find 'Change project' button")
+            raise RuntimeError("Could not find 'Изменить тип проекта' / 'Change project' button")
 
+        # After click: a text input + "Сохранить"/"Save" button appear inline
+        # (no modal, it's an in-place form). Multiple invisible input[type=text]
+        # exist on the page (hidden search bars) — find the only VISIBLE +
+        # ENABLED one by JS, then click by center coordinate.
         page.wait_for_timeout(1500)
-        # Modal opens with a text input for the project number
-        page.locator("input[type=text]").first.fill(str(project_number))
+        target = page.evaluate("""() => {
+            const inputs = document.querySelectorAll('input[type=text], input:not([type])');
+            for (const el of inputs) {
+                if (el.offsetParent !== null && !el.disabled && !el.readOnly) {
+                    const r = el.getBoundingClientRect();
+                    return {x: r.x + r.width/2, y: r.y + r.height/2};
+                }
+            }
+            return null;
+        }""")
+        if not target:
+            raise RuntimeError("No visible+enabled text input found after Change-project click")
+        page.mouse.click(target["x"], target["y"])
+        page.wait_for_timeout(200)
+        page.keyboard.type(str(project_number), delay=20)
         page.wait_for_timeout(500)
-        # Click "Set project" / "Задать проект"
+        # Click "Сохранить" / "Save"
         confirmed = False
-        for label in ("Задать проект", "Set project", "Установить"):
+        for label in ("Сохранить", "Save", "Задать проект", "Set project"):
             try:
-                page.get_by_text(label, exact=False).first.click(timeout=3000)
+                page.get_by_text(label, exact=True).first.click(timeout=3000)
                 confirmed = True
                 break
             except Exception:
                 continue
         if not confirmed:
-            raise RuntimeError("Could not find 'Set project' confirmation button")
+            raise RuntimeError("Could not find 'Сохранить' / 'Save' confirmation button")
 
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(4000)
         return {
             "ok": True,
             "script_id": script_id,
