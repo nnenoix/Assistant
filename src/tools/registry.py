@@ -14,7 +14,7 @@ from src import auth as _auth
 from src.tools import (
     analytics, apps_script, apps_script_api, bank_parser, browser, calendar,
     chats, cloud_logging, drive, excel, gcp, gmail, local_fs, macros, notes,
-    people, reports, sheets, wb,
+    people, reports, sheets, watcher, wb,
 )
 from src.tools import bank_parser as _bank_parser  # alias
 
@@ -969,6 +969,56 @@ TOOLS = [
                 "kind": {"type": "string"},
             },
             "required": ["name"],
+        },
+    ),
+    # --- Watcher (Apps Script failure monitoring via Cloud Logging) ---
+    _tool(
+        "watcher_recent_failures",
+        watcher.recent_failures,
+        "apps_script.edit",
+        "Detect recent Apps Script failures (Exception, SyntaxError, 429/rate-limit aborts, etc.) for a given script_id via Cloud Logging. Returns {failures: [{timestamp, function, execution_id, severity, kind, message}]}. Use when the user says 'проверь не падал ли X' or proactively after deploying a fix to confirm the next execution succeeded.",
+        {
+            "type": "object",
+            "properties": {
+                "script_id": {"type": "string"},
+                "since_minutes": {"type": "integer", "default": 60},
+            },
+            "required": ["script_id"],
+        },
+    ),
+    _tool(
+        "watcher_poll_known_scripts",
+        watcher.poll_known_scripts,
+        "apps_script.edit",
+        "Scan ALL monitored scripts (Mylib + everything in the bound-script registry) for failures and append new ones to the alerts queue. Background watcher runs this every 5 min automatically; call manually to force an immediate check. Idempotent (won't duplicate).",
+        {
+            "type": "object",
+            "properties": {"since_minutes": {"type": "integer", "default": 30}},
+        },
+    ),
+    _tool(
+        "watcher_list_alerts",
+        watcher.list_alerts,
+        "notes.read",
+        "List queued failure alerts (newest first). Pass unread_only=True to see only fresh ones. Each alert: {id, script_label, function, kind, timestamp, message, read}.",
+        {
+            "type": "object",
+            "properties": {
+                "unread_only": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "default": 50},
+            },
+        },
+    ),
+    _tool(
+        "watcher_mark_alerts_read",
+        watcher.mark_alerts_read,
+        "notes.write",
+        "Mark alerts as read. If alert_ids is omitted, marks ALL as read.",
+        {
+            "type": "object",
+            "properties": {
+                "alert_ids": {"type": "array", "items": {"type": "string"}},
+            },
         },
     ),
     _tool(

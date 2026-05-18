@@ -632,6 +632,82 @@
     color: var(--text-3);
     font-size: 11.5px;
   }
+
+  /* alerts banner — pushed by background watcher when a monitored
+     Apps Script logs a failure (Exception, 429-stop, SyntaxError, ...) */
+  .alerts-wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+  .alerts-banner {
+    background: var(--warn-soft);
+    border: 1px solid rgba(202, 138, 4, 0.5);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin: 0 0 12px 0;
+    display: flex; flex-direction: column;
+    gap: 8px;
+  }
+  .alerts-banner.severity-error {
+    background: var(--danger-soft);
+    border-color: rgba(185, 28, 28, 0.5);
+  }
+  .alerts-banner-head {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--warn-text);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .alerts-banner.severity-error .alerts-banner-head { color: var(--danger-text); }
+  .alerts-banner-head svg { width: 14px; height: 14px; }
+  .alerts-banner-head .count { background: rgba(255,255,255,0.1); border-radius: 9px; padding: 1px 7px; font-size: 11px; }
+  .alerts-banner-head .clear {
+    margin-left: auto;
+    color: inherit; background: transparent; border: 0;
+    cursor: pointer; opacity: 0.7; font-size: 11.5px;
+  }
+  .alerts-banner-head .clear:hover { opacity: 1; }
+  .alert-row {
+    background: rgba(0,0,0,0.18);
+    border-radius: 7px;
+    padding: 8px 10px;
+    display: flex; gap: 10px; align-items: flex-start;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .alert-row .alert-meta {
+    color: var(--text-3);
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+  .alert-row .alert-msg {
+    flex: 1 1 auto;
+    overflow: hidden;
+    line-height: 1.45;
+  }
+  .alert-row .alert-msg .kind { font-weight: 600; color: var(--warn-text); }
+  .alerts-banner.severity-error .alert-row .alert-msg .kind { color: var(--danger-text); }
+  .alert-row .actions {
+    display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto;
+  }
+  .alert-row button {
+    background: var(--surface);
+    border: 1px solid var(--border-2);
+    border-radius: 6px;
+    color: var(--text-2);
+    cursor: pointer;
+    padding: 3px 8px;
+    font-size: 11px;
+    transition: background .12s;
+  }
+  .alert-row button:hover { background: var(--surface-2); color: var(--text); }
+  .alert-row button.primary {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+  }
+  .alert-row button.primary:hover { background: #1d4fd8; }
   .kbd {
     font-family: var(--mono);
     font-size: 10.5px;
@@ -1371,6 +1447,7 @@ function App() {
   const [streaming, setStreaming] = useState(false);
   const [approvalQueue, setApprovalQueue] = useState([]); // FIFO of approval_required events
   const [connError, setConnError] = useState(null);
+  const [alerts, setAlerts] = useState([]); // queued failure alerts from watcher
   const [accounts, setAccounts] = useState([]);
   const [model, setModel] = useState(null);
   const [models, setModels] = useState([]);
@@ -1418,6 +1495,49 @@ function App() {
       })
       .catch(() => {});
   }, []);
+
+  /* ── poll alerts: every 30s + on mount. Background watcher writes to
+        alerts.json from Cloud Logging; we surface them here.            */
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      fetch("/api/alerts?unread_only=false&limit=20")
+        .then(r => r.ok ? r.json() : null)
+        .then(j => { if (!cancelled && j) setAlerts(j.alerts || []); })
+        .catch(() => {});
+    };
+    tick();
+    const id = setInterval(tick, 30_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const dismissAlert = useCallback(async (id) => {
+    setAlerts(prev => prev.filter(a => a.id !== id));
+    try {
+      await fetch("/api/alerts/mark_read", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ alert_ids: [id] }),
+      });
+    } catch {}
+  }, []);
+
+  const dismissAllAlerts = useCallback(async () => {
+    setAlerts([]);
+    try {
+      await fetch("/api/alerts/mark_read", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ alert_ids: null }),
+      });
+    } catch {}
+  }, []);
+
+  const askAboutAlert = useCallback((alert) => {
+    const msg = `Скрипт ${alert.script_label || alert.script_id} (функция ${alert.function || "?"}) упал в ${alert.timestamp}: «${alert.kind}». Открой Cloud Logging по этому скрипту, посмотри что именно случилось, и если можно — почини.`;
+    sendMessage(msg, []);
+    dismissAlert(alert.id);
+  }, [dismissAlert]);
 
   const onSelectModel = useCallback(async (alias) => {
     if (!alias || alias === model) return;
@@ -1537,6 +1657,14 @@ function App() {
       }
       case "fatal_error": {
         updateLastAsst(events => [...events, { kind: "fatal", error: ev.error, id: cryptoId() }]);
+        break;
+      }
+      case "alert": {
+        // Background watcher pushed a new failure alert
+        setAlerts(prev => {
+          if (prev.some(a => a.id === ev.alert.id)) return prev;
+          return [ev.alert, ...prev];
+        });
         break;
       }
       case "done": {
@@ -1679,8 +1807,45 @@ function App() {
           </div>
         `}
       </div>
+      <${AlertsBanner} alerts=${alerts} onDiscuss=${askAboutAlert} onDismiss=${dismissAlert} onClearAll=${dismissAllAlerts} />
       <${Composer} disabled=${inputDisabled} onSend=${sendMessage} />
       <${ApprovalModal} req=${currentApproval} onResolve=${onApprovalResolve} />
+    </div>
+  `;
+}
+
+/* ── alerts banner — failures pushed by the background watcher ─── */
+function AlertsBanner({ alerts, onDiscuss, onDismiss, onClearAll }) {
+  const unread = (alerts || []).filter(a => !a.read);
+  if (unread.length === 0) return null;
+  const hasError = unread.some(a => (a.severity || "").toUpperCase().includes("ERROR"));
+  const fmtTime = (ts) => {
+    if (!ts) return "?";
+    try { return new Date(ts).toLocaleString("ru-RU", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" }); }
+    catch { return ts.slice(0, 16); }
+  };
+  return html`
+    <div class="alerts-wrap">
+      <div class=${"alerts-banner" + (hasError ? " severity-error" : "")}>
+        <div class="alerts-banner-head">
+          <${Icon} name="alert" />
+          Сбои в Apps Script <span class="count">${unread.length}</span>
+          <button class="clear" onClick=${onClearAll}>Скрыть все</button>
+        </div>
+        ${unread.slice(0, 5).map(a => html`
+          <div class="alert-row" key=${a.id}>
+            <div class="alert-msg">
+              <span class="kind">${a.kind || "Ошибка"}</span> — ${a.script_label || a.script_id?.slice(0, 14)} / <code>${a.function || "?"}</code>
+              <div class="alert-meta">${fmtTime(a.timestamp)} · ${(a.preview || a.message || "").slice(0, 120)}</div>
+            </div>
+            <div class="actions">
+              <button class="primary" onClick=${() => onDiscuss(a)}>Что делать?</button>
+              <button onClick=${() => onDismiss(a.id)}>×</button>
+            </div>
+          </div>
+        `)}
+        ${unread.length > 5 && html`<div class="alert-meta" style="text-align: center;">+ ещё ${unread.length - 5} ...</div>`}
+      </div>
     </div>
   `;
 }

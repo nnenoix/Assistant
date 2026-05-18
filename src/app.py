@@ -1,7 +1,9 @@
 import asyncio
 import json
+import logging
 import shutil
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -18,11 +20,56 @@ from src.policy import Policy
 UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
+logger = logging.getLogger("workspace_agent")
+WATCHER_INTERVAL_SEC = 300  # 5 min between Cloud Logging polls
+WATCHER_LOOKBACK_MIN = 30   # how far back each poll looks
+
 
 GCP_TEST_USERS_URL = "https://console.cloud.google.com/auth/audience?project=claude-mcp-496508"
 
 
-app = FastAPI(title="Google Workspace Chat Agent")
+async def _watcher_loop():
+    """Background poller. Every WATCHER_INTERVAL_SEC, scans known scripts'
+    Cloud Logging for failures and appends new ones to .data/alerts.json.
+    Failures during polling are logged but don't kill the loop.
+    """
+    from src.tools import watcher
+    while True:
+        try:
+            await asyncio.sleep(WATCHER_INTERVAL_SEC)
+            r = await asyncio.to_thread(watcher.poll_known_scripts, WATCHER_LOOKBACK_MIN)
+            if r["new_alerts"] > 0:
+                logger.info(f"[watcher] {r['new_alerts']} new alerts from {r['checked_scripts']} scripts")
+                # Push to any open SSE streams so user sees immediately
+                for alert in r["alerts_added"]:
+                    payload = {"type": "alert", "alert": alert}
+                    for q in list(_run_queues.values()):
+                        try:
+                            q.put_nowait(payload)
+                        except Exception:
+                            pass
+            if r.get("errors"):
+                logger.warning(f"[watcher] {len(r['errors'])} scripts errored on polling")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[watcher] loop iteration failed: {type(e).__name__}: {e}")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    task = asyncio.create_task(_watcher_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Google Workspace Chat Agent", lifespan=_lifespan)
 
 STATIC_DIR = PROJECT_ROOT / "static"
 STATIC_DIR.mkdir(exist_ok=True)
@@ -97,6 +144,37 @@ async def chat(req: ChatRequest):
 
     asyncio.create_task(runner())
     return {"run_id": run_id}
+
+
+@app.get("/api/alerts")
+async def list_alerts_api(unread_only: bool = False, limit: int = 50):
+    """Return queued failure alerts. UI polls this every 30s to show the
+    notification badge / banner."""
+    from src.tools import watcher
+    return watcher.list_alerts(unread_only=unread_only, limit=limit)
+
+
+class MarkAlertsRequest(BaseModel):
+    alert_ids: list[str] | None = None
+
+
+@app.post("/api/alerts/mark_read")
+async def mark_alerts_read_api(req: MarkAlertsRequest):
+    from src.tools import watcher
+    return watcher.mark_alerts_read(req.alert_ids)
+
+
+@app.post("/api/alerts/clear")
+async def clear_alerts_api(read_only: bool = True):
+    from src.tools import watcher
+    return watcher.clear_alerts(read_only=read_only)
+
+
+@app.post("/api/watcher/poll_now")
+async def poll_now_api(since_minutes: int = 30):
+    """Force an immediate watcher poll (for manual checks / dev)."""
+    from src.tools import watcher
+    return await asyncio.to_thread(watcher.poll_known_scripts, since_minutes)
 
 
 @app.post("/api/upload")
