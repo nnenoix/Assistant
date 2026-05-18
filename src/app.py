@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from src import auth, chats
 from src.agent import AgentSession, KNOWN_MODELS
-from src.config import ALLOWLIST_PATH, DATA_DIR, PROJECT_ROOT
+from src.config import ALLOWLIST_PATH, DATA_DIR, PROJECT_ROOT, STATIC_DIR as _STATIC_DIR
 from src.policy import Policy
 
 
@@ -71,8 +71,7 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="Google Workspace Chat Agent", lifespan=_lifespan)
 
-STATIC_DIR = PROJECT_ROOT / "static"
-STATIC_DIR.mkdir(exist_ok=True)
+STATIC_DIR = _STATIC_DIR
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 _session = AgentSession(policy=Policy.load(ALLOWLIST_PATH))

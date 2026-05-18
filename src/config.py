@@ -1,9 +1,41 @@
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def _app_root() -> Path:
+    """Where state and config live.
+
+    - From source: parent of src/ (the project root).
+    - Frozen (PyInstaller .exe): the directory containing the .exe itself.
+      User drops client_secret_*.json next to the exe; .data/ is created
+      alongside on first run.
+    """
+    if getattr(sys, "frozen", False):  # PyInstaller sets this
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _bundle_root() -> Path:
+    """Where READ-ONLY resources shipped with the build live.
+
+    - From source: same as _app_root() (static/, bank_parsers/, etc. sit
+      next to src/).
+    - Frozen: PyInstaller puts the `datas=...` entries from the .spec
+      under `sys._MEIPASS` (a temp dir for --onefile, or the `_internal/`
+      sibling folder for --onedir). Resources are read-only; the user-
+      writable state lives in _app_root().
+    """
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent / "_internal"))
+    return Path(__file__).resolve().parent.parent
+
+
+PROJECT_ROOT = _app_root()
+BUNDLE_ROOT = _bundle_root()
 DATA_DIR = PROJECT_ROOT / ".data"
 SCRIPTS_DIR = DATA_DIR / "scripts"
 ALLOWLIST_PATH = DATA_DIR / "allowlist.json"
+STATIC_DIR = BUNDLE_ROOT / "static"
 
 # OAuth client secret file — match by glob, the engineer has only one
 CLIENT_SECRET_PATH = next(

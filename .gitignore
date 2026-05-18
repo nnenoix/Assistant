@@ -11,3 +11,7 @@ client_secret_*.json
 # Editor
 .vscode/
 .idea/
+
+# PyInstaller build artifacts
+build/
+dist/
