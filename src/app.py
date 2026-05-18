@@ -1,16 +1,22 @@
 import asyncio
 import json
+import shutil
 import uuid
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src import auth, chats
 from src.agent import AgentSession, KNOWN_MODELS
-from src.config import ALLOWLIST_PATH, PROJECT_ROOT
+from src.config import ALLOWLIST_PATH, DATA_DIR, PROJECT_ROOT
 from src.policy import Policy
+
+
+UPLOADS_DIR = DATA_DIR / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
 
 
 GCP_TEST_USERS_URL = "https://console.cloud.google.com/auth/audience?project=claude-mcp-496508"
@@ -37,6 +43,7 @@ def _ensure_chat_log() -> chats.ChatLog:
 
 class ChatRequest(BaseModel):
     message: str
+    attachments: list[dict] | None = None  # [{path, name, kind}, ...]
 
 
 class ApproveRequest(BaseModel):
@@ -53,6 +60,23 @@ async def chat(req: ChatRequest):
     log = _ensure_chat_log()
     log.append_user(req.message)
 
+    # Bake attachment paths into the message so the agent sees them.
+    message = req.message
+    if req.attachments:
+        atts_lines = []
+        for a in req.attachments:
+            name = a.get("name") or "(unnamed)"
+            path = a.get("path")
+            kind = a.get("kind", "file")
+            if path:
+                atts_lines.append(f"  - {kind}: {name} → {path}")
+        if atts_lines:
+            message = (
+                req.message
+                + "\n\n[Attachments — local paths the user just shared:]\n"
+                + "\n".join(atts_lines)
+            )
+
     run_id = str(uuid.uuid4())
     queue: asyncio.Queue = asyncio.Queue()
     _run_queues[run_id] = queue
@@ -62,17 +86,61 @@ async def chat(req: ChatRequest):
         try:
             log.append_event(event)
         except Exception:
-            pass  # persistence failures must not break the stream
+            pass
 
     async def runner():
         try:
-            await _session.run_turn(req.message, emit)
+            await _session.run_turn(message, emit)
         except Exception as e:
             await emit({"type": "fatal_error", "error": f"{type(e).__name__}: {e}"})
             await emit({"type": "done"})
 
     asyncio.create_task(runner())
     return {"run_id": run_id}
+
+
+@app.post("/api/upload")
+async def upload(files: list[UploadFile] = File(...), folder_name: str | None = Form(None)):
+    """Receive file uploads from the chat UI. Saves them under
+    `.data/uploads/<batch_id>/[<folder_name>/]<filename>` so the agent has
+    a stable local path to reference. Returns list of {name, path, size, kind}.
+
+    For folder uploads, the browser sends multiple files with relative paths
+    in the `name` field (webkitdirectory); we preserve that structure.
+    """
+    batch_id = uuid.uuid4().hex[:8]
+    batch_dir = UPLOADS_DIR / batch_id
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    saved: list[dict] = []
+    for f in files:
+        # filename may contain subdirs for folder uploads (webkitRelativePath)
+        rel = f.filename or "unnamed"
+        target = batch_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as out:
+            shutil.copyfileobj(f.file, out)
+        suffix = target.suffix.lower()
+        kind = "image" if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"} \
+            else "pdf" if suffix == ".pdf" \
+            else "excel" if suffix in {".xlsx", ".xls", ".xlsm"} \
+            else "text" if suffix in {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log"} \
+            else "file"
+        saved.append({
+            "name": rel,
+            "path": str(target.resolve()),
+            "size": target.stat().st_size,
+            "kind": kind,
+        })
+
+    return {
+        "batch_id": batch_id,
+        "batch_dir": str(batch_dir.resolve()),
+        "count": len(saved),
+        "files": saved,
+        "is_folder": folder_name is not None,
+        "folder_name": folder_name,
+    }
 
 
 @app.get("/stream/{run_id}")

@@ -11,7 +11,8 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
 from src import auth as _auth
-from src.tools import apps_script, apps_script_api, browser, calendar, chats, cloud_logging, drive, excel, gcp, gmail, local_fs, macros, notes, people, sheets, wb
+from src.tools import apps_script, apps_script_api, bank_parser, browser, calendar, chats, cloud_logging, drive, excel, gcp, gmail, local_fs, macros, notes, people, sheets, wb
+from src.tools import bank_parser as _bank_parser  # alias
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -806,8 +807,74 @@ TOOLS = [
         "local_list_dir",
         local_fs.list_dir,
         "local.read",
-        "List entries in a local directory.",
+        "List entries in a local directory (shallow).",
         {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
+    _tool(
+        "local_walk_dir",
+        local_fs.walk_dir,
+        "local.read",
+        "Recursively list ALL files in a directory. Returns [{rel_path, size, suffix}]. Cuts off at max_files (default 500) so large repos don't blow up. Use when the user attaches a folder and you need to see what's inside.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "max_files": {"type": "integer", "default": 500},
+                "include_hidden": {"type": "boolean", "default": False},
+            },
+            "required": ["path"],
+        },
+    ),
+    _tool(
+        "local_extract_pdf_text",
+        local_fs.extract_pdf_text,
+        "local.read",
+        "Extract text from a local PDF using pdfplumber. Returns {file_name, pages_count, text, chars, truncated}. Use `pages='1-3'` or `pages='5'` to limit page range when the PDF is large. For BANK STATEMENTS prefer parse_bank_statement — it understands transaction tables; this raw extractor is for general PDFs (contracts, receipts, scans-with-text).",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "pages": {"type": "string", "description": "Page range, e.g. '1-3' or '5' or '1,3,5'. Omit for all pages."},
+                "max_chars": {"type": "integer", "description": "Cap output (the tool wrapper truncates at 12k anyway)."},
+            },
+            "required": ["path"],
+        },
+    ),
+    _tool(
+        "local_image_info",
+        local_fs.image_info,
+        "local.read",
+        "Get image metadata + a base64 data-URL preview suitable for sending to a multimodal model. Image is downscaled to max 1568px side. Returns {file_name, format, width, height, bytes, data_url}. Use to inspect screenshots, photos, or other images the user attaches.",
+        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
+    # --- Bank statement parser (PDFs of Russian banks) ---
+    _tool(
+        "bank_parse_statement",
+        bank_parser.parse_bank_statement,
+        "local.read",
+        "Parse a Russian bank statement PDF (or 1С client-bank .txt). Auto-detects which bank: Сбер (физ/бизнес), Альфа, Т-Банк, Газпромбанк, ВТБ, Райффайзен, ЮниКредит, Ozon, Modulbank, Точка, Wildberries, 1С export. Returns {bank, transactions: [{date, description, amount_cents, inn?, counterparty?, ...}], account_last4?}. amount_cents is in КОПЕЙКАХ (×0.01 for ₽). Pass bank_hint to skip detection when the user already named the bank.",
+        {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+                "bank_hint": {"type": "string", "description": "Optional. One of: alfa, sber, sber_business, tinkoff, gazprom, vtb, raif, unicredit, ozon, modul, tochka, wb_bank, clientbank_1c."},
+            },
+            "required": ["file_path"],
+        },
+    ),
+    _tool(
+        "bank_detect",
+        bank_parser.detect_bank,
+        "local.read",
+        "Quick check whether a file is a recognized bank statement. Returns {bank} (e.g. 'sber') or {bank: null, error: 'no parser matched'}. Cheap — runs each parser's can_parse() in order. Use before parse_statement to confirm format.",
+        {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]},
+    ),
+    _tool(
+        "bank_list_supported",
+        bank_parser.list_supported_banks,
+        "local.read",
+        "List the bank ids the parser supports.",
+        {"type": "object", "properties": {}},
     ),
     # --- Google Calendar ---
     _tool(

@@ -99,6 +99,15 @@ Rules:
    - `drive_name_patterns(query=<entity>)` (or `_everywhere` if you don't know the account) returns categorized tokens: `recurring_codes_2_3_upper` (brand/project codes like SA, IN, RM), `doc_type_candidates`, `year_tokens`, `common_other_words`. **Every entry** in those buckets is part of the answer — list them ALL in your reply, don't cherry-pick.
    - Cross-reference: if a 2-letter code (e.g. `SA`) appears alongside a full-word name (e.g. `SensesAura`) in different file names, infer they're the same thing and report the readable name with the code in parens.
    - Only AFTER you've mapped the categorical structure should you open specific files to answer numeric/detail follow-ups. Do NOT answer "what brands does X have" from a single file's tab list — that file shows what's in THAT file, not the full set of brands.
+
+16. **User-attached files and folders (paths under .data/uploads/).** When the user attaches files via the chat UI, the message ends with an "[Attachments — local paths the user just shared:]" section listing the absolute paths. Pick the right tool by file kind:
+   - **Bank statement PDF** (Сбер, Альфа, Т-Банк, Газпром, ВТБ, Райф, Ozon, Modul, Точка, ЮниКредит, ВБ, или 1С client-bank .txt) → call `bank_detect` first to confirm the format, then `bank_parse_statement(file_path)` to extract transactions. Amounts are returned in КОПЕЙКАХ — multiply by 0.01 for ₽.
+   - **Other PDF** (contract, receipt, scan with text layer) → `local_extract_pdf_text` with `pages=` to limit range.
+   - **Image** (.png/.jpg/etc.) → `local_image_info` returns a data_url you can include directly in your reasoning (this model is multimodal). Use this for screenshots, photos of receipts, diagrams.
+   - **Excel** → `excel_parse(local_path)` with `sheet=` for one sheet at a time.
+   - **Folder** → `local_walk_dir(path)` lists everything recursively. If it's a folder of bank statements, loop `bank_parse_statement` over the PDFs.
+   - **Text/CSV/JSON/MD** → `local_read_file` with chunked offset/limit for big files.
+   Report what you found: detected bank, transaction count, date range, total ₽, or a brief summary appropriate to the file type. Never just acknowledge an attachment without inspecting it.
 """
 
 

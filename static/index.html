@@ -553,6 +553,79 @@
   .send-btn:disabled { background: var(--surface-2); color: var(--text-3); cursor: not-allowed; border: 1px solid var(--border); }
   .send-btn svg { width: 16px; height: 16px; }
 
+  .attach-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+    flex: 0 0 auto;
+  }
+  .attach-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--text); border-color: var(--border-2); }
+  .attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .attach-btn svg { width: 16px; height: 16px; }
+
+  .attachments-row {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-bottom: 8px;
+  }
+  .attachment-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--primary-soft);
+    color: var(--primary-text);
+    border: 1px solid rgba(37,99,235,0.4);
+    border-radius: 16px;
+    padding: 4px 4px 4px 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    max-width: 280px;
+  }
+  .attachment-chip .chip-icon { width: 13px; height: 13px; flex: 0 0 auto; }
+  .attachment-chip .chip-name {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .attachment-chip .chip-meta { color: var(--text-3); font-size: 10.5px; }
+  .attachment-chip button {
+    background: transparent;
+    border: 0;
+    color: inherit;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    opacity: 0.7;
+    transition: opacity .12s, background .12s;
+  }
+  .attachment-chip button:hover { opacity: 1; background: rgba(255,255,255,0.08); }
+  .attachment-chip button svg { width: 11px; height: 11px; }
+  .attachment-chip.uploading { opacity: 0.7; }
+  .attachment-chip.uploading::after {
+    content: ''; width: 10px; height: 10px;
+    border: 1.5px solid currentColor; border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 4px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .composer-inner.dropping {
+    border-color: var(--primary);
+    background: var(--primary-soft);
+  }
+  .drop-hint {
+    position: absolute;
+    inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--primary-text);
+    font-size: 13px;
+    pointer-events: none;
+    background: rgba(37,99,235,0.08);
+    border-radius: 12px;
+  }
+
   .composer-meta {
     margin-top: 8px;
     display: flex; justify-content: space-between;
@@ -726,6 +799,7 @@ import {
   HardDrive, Sheet, Code2, FileSpreadsheet, Folder, KeyRound,
   ChevronRight, TriangleAlert, Send, ShieldCheck, Sparkles, RefreshCw,
   Users, Copy, Check, Box, Sun, Moon,
+  Paperclip, X, File, FileText, Image,
 } from "https://esm.sh/lucide-preact@0.475.0?deps=preact@10.22.0";
 
 const html = htm.bind(h);
@@ -758,6 +832,11 @@ const ICONS = {
   box: Box,
   sun: Sun,
   moon: Moon,
+  paperclip: Paperclip,
+  x: X,
+  file: File,
+  "file-text": FileText,
+  image: Image,
 };
 const Icon = ({ name, size = 14, ...rest }) => {
   const Comp = ICONS[name] || ICONS.box;
@@ -1016,7 +1095,12 @@ function Header({ accounts, theme, onToggleTheme, model, models, onSelectModel, 
 /* ── composer ────────────────────────────────────────────────────── */
 function Composer({ disabled, onSend }) {
   const [value, setValue] = useState("");
+  // attachments: [{id, name, path?, size?, kind, uploading?, error?}]
+  const [attachments, setAttachments] = useState([]);
+  const [dropping, setDropping] = useState(false);
   const taRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
 
   const autoSize = () => {
     const el = taRef.current;
@@ -1028,11 +1112,100 @@ function Composer({ disabled, onSend }) {
   useEffect(() => { autoSize(); }, [value]);
   useEffect(() => { if (!disabled) taRef.current?.focus(); }, [disabled]);
 
+  /* Upload a FileList to /api/upload. Updates `attachments` state in-place
+     (pending → done/error). For folder uploads, all files belong to one
+     batch under <uploads>/<batch_id>/<folder_name>/...
+  */
+  const uploadFiles = async (fileList, asFolder) => {
+    if (!fileList || fileList.length === 0) return;
+    // Create pending chips so the user sees progress immediately
+    const pending = Array.from(fileList).map(f => ({
+      id: crypto.randomUUID(),
+      name: f.webkitRelativePath || f.name,
+      size: f.size,
+      kind: guessKind(f.name),
+      uploading: true,
+    }));
+    setAttachments(prev => [...prev, ...pending]);
+
+    const fd = new FormData();
+    for (const f of fileList) {
+      // Preserve webkitRelativePath for folder structure
+      fd.append("files", f, f.webkitRelativePath || f.name);
+    }
+    if (asFolder && fileList.length > 0) {
+      const first = fileList[0].webkitRelativePath || "";
+      const folderName = first.split("/")[0] || "folder";
+      fd.append("folder_name", folderName);
+    }
+
+    try {
+      const r = await fetch("/api/upload", { method: "POST", body: fd });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      // Match server-returned files (by name) back to our pending chips
+      setAttachments(prev => prev.map(a => {
+        if (!a.uploading) return a;
+        const match = j.files.find(f => f.name === a.name);
+        if (!match) return { ...a, uploading: false, error: "not in response" };
+        return {
+          ...a,
+          uploading: false,
+          path: match.path,
+          size: match.size,
+          kind: match.kind,
+        };
+      }));
+    } catch (e) {
+      setAttachments(prev => prev.map(a =>
+        a.uploading ? { ...a, uploading: false, error: String(e).slice(0, 80) } : a
+      ));
+    }
+  };
+
+  const guessKind = (name) => {
+    const ext = (name || "").toLowerCase().split(".").pop();
+    if (["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(ext)) return "image";
+    if (ext === "pdf") return "pdf";
+    if (["xlsx", "xls", "xlsm"].includes(ext)) return "excel";
+    if (["txt", "md", "csv", "json", "yaml", "yml", "log"].includes(ext)) return "text";
+    return "file";
+  };
+
+  const removeAttachment = (id) => {
+    setAttachments(prev => prev.filter(a => a.id !== id));
+  };
+
+  /* Drag and drop */
+  const onDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes("Files")) setDropping(true);
+  };
+  const onDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDropping(false);
+  };
+  const onDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDropping(false);
+    if (e.dataTransfer.files?.length) {
+      uploadFiles(e.dataTransfer.files, false);
+    }
+  };
+
   const submit = () => {
     const trimmed = value.trim();
-    if (!trimmed || disabled) return;
-    onSend(trimmed);
+    const readyAtts = attachments.filter(a => a.path && !a.uploading);
+    // Allow sending even with empty text if there ARE attachments
+    if ((!trimmed && readyAtts.length === 0) || disabled) return;
+    // Block if any uploads are still pending
+    if (attachments.some(a => a.uploading)) return;
+    onSend(trimmed || "(см. вложения)", readyAtts);
     setValue("");
+    setAttachments([]);
   };
 
   const onKey = (e) => {
@@ -1042,30 +1215,104 @@ function Composer({ disabled, onSend }) {
     }
   };
 
+  const hasUploading = attachments.some(a => a.uploading);
+  const sendDisabled = disabled || hasUploading || (!value.trim() && attachments.length === 0);
+
   return html`
     <div class="composer-wrap">
       <div class="composer">
-        <div class=${"composer-inner" + (disabled ? " disabled" : "")}>
+        <input
+          type="file"
+          ref=${fileInputRef}
+          multiple
+          style="display:none"
+          onChange=${(e) => { uploadFiles(e.target.files, false); e.target.value = ""; }}
+        />
+        <input
+          type="file"
+          ref=${folderInputRef}
+          webkitdirectory=""
+          directory=""
+          multiple
+          style="display:none"
+          onChange=${(e) => { uploadFiles(e.target.files, true); e.target.value = ""; }}
+        />
+        ${attachments.length > 0 && html`
+          <div class="attachments-row">
+            ${attachments.map(a => html`
+              <div class=${"attachment-chip" + (a.uploading ? " uploading" : "") + (a.error ? " error" : "")} key=${a.id}>
+                <${Icon} name=${attachKindIcon(a.kind)} class="chip-icon" />
+                <span class="chip-name" title=${a.path || a.name}>${a.name}</span>
+                ${a.size && html`<span class="chip-meta">${fmtSize(a.size)}</span>`}
+                ${a.error && html`<span class="chip-meta" style="color: var(--danger-text);">${a.error}</span>`}
+                <button onClick=${() => removeAttachment(a.id)} aria-label="Убрать">
+                  <${Icon} name="x" />
+                </button>
+              </div>
+            `)}
+          </div>
+        `}
+        <div
+          class=${"composer-inner" + (disabled ? " disabled" : "") + (dropping ? " dropping" : "")}
+          onDragOver=${onDragOver}
+          onDragLeave=${onDragLeave}
+          onDrop=${onDrop}
+          style="position: relative;"
+        >
+          <button
+            class="attach-btn"
+            disabled=${disabled}
+            onClick=${() => fileInputRef.current?.click()}
+            aria-label="Прикрепить файл"
+            title="Прикрепить файл"
+          >
+            <${Icon} name="paperclip" />
+          </button>
+          <button
+            class="attach-btn"
+            disabled=${disabled}
+            onClick=${() => folderInputRef.current?.click()}
+            aria-label="Прикрепить папку"
+            title="Прикрепить папку"
+          >
+            <${Icon} name="folder" />
+          </button>
           <textarea
             ref=${taRef}
             rows="1"
-            placeholder="Что нужно сделать? Например: «покажи мои последние 5 файлов»"
+            placeholder="Что нужно сделать? Или перетащи файл/папку сюда."
             value=${value}
             onInput=${e => setValue(e.target.value)}
             onKeyDown=${onKey}
             disabled=${disabled}
           ></textarea>
-          <button class="send-btn" disabled=${disabled || !value.trim()} onClick=${submit} aria-label="Отправить">
+          <button class="send-btn" disabled=${sendDisabled} onClick=${submit} aria-label="Отправить">
             <${Icon} name="send" />
           </button>
+          ${dropping && html`<div class="drop-hint">Отпусти файлы здесь</div>`}
         </div>
         <div class="composer-meta">
-          <span>${disabled ? "Агент работает…" : "Готов к запросу"}</span>
+          <span>${disabled ? "Агент работает…" : hasUploading ? "Загрузка…" : "Готов к запросу"}</span>
           <span><span class="kbd">Enter</span> отправить · <span class="kbd">Shift</span>+<span class="kbd">Enter</span> новая строка</span>
         </div>
       </div>
     </div>
   `;
+}
+
+function attachKindIcon(kind) {
+  return ({
+    image: "image",
+    pdf: "file-text",
+    excel: "file-text",
+    text: "file-text",
+  })[kind] || "file";
+}
+function fmtSize(b) {
+  if (b < 1024) return b + "B";
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + "KB";
+  if (b < 1024 * 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + "MB";
+  return (b / 1024 / 1024 / 1024).toFixed(2) + "GB";
 }
 
 /* ── render one assistant event ──────────────────────────────────── */
@@ -1082,7 +1329,19 @@ function Turn({ turn, isLast, isStreaming, awaitingFirstReply }) {
   if (turn.role === "user") {
     return html`
       <div class="turn-user">
-        <div class="bubble-user">${turn.text}</div>
+        <div class="bubble-user">
+          ${turn.text}
+          ${turn.attachments && turn.attachments.length > 0 && html`
+            <div class="attachments-row" style="margin-top: 8px;">
+              ${turn.attachments.map(a => html`
+                <div class="attachment-chip" key=${a.path || a.name} style="background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.2); color: inherit;">
+                  <${Icon} name=${attachKindIcon(a.kind)} class="chip-icon" />
+                  <span class="chip-name" title=${a.path}>${a.name}</span>
+                </div>
+              `)}
+            </div>
+          `}
+        </div>
       </div>
     `;
   }
@@ -1314,12 +1573,13 @@ function App() {
   }, []);
 
   /* ── kick off a turn ────────────────────────────────────────── */
-  const sendMessage = useCallback(async (text) => {
+  const sendMessage = useCallback(async (text, attachments) => {
     setConnError(null);
+    const atts = attachments || [];
     // append user + empty assistant turn
     setTurns(prev => [
       ...prev,
-      { role: "user", text },
+      { role: "user", text, attachments: atts },
       { role: "assistant", events: [] },
     ]);
     setStreaming(true);
@@ -1329,7 +1589,10 @@ function App() {
       const r = await fetch("/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          attachments: atts.map(a => ({ name: a.name, path: a.path, kind: a.kind })),
+        }),
       });
       if (!r.ok) throw new Error(`POST /chat → ${r.status}`);
       const j = await r.json();
