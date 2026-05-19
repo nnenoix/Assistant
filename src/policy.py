@@ -39,7 +39,10 @@ class Policy:
         if category == "sheets":
             return args.get("spreadsheet_id") in allow
         if category == "local":
-            target = args.get("path", "")
+            # Different local_* tools use different param names — check all
+            # the common ones (path, file_path, local_path) so policy doesn't
+            # accidentally allow a read that the user meant to gate.
+            target = args.get("path") or args.get("file_path") or args.get("local_path") or ""
             if not target:
                 return False
             target_norm = Path(target).resolve().as_posix().lower()

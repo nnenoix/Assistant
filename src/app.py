@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,6 +18,26 @@ from src.policy import Policy
 
 UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+
+# Reject uploads larger than this (per batch). A misbehaving client (or
+# browser tab) streaming infinity bytes to /api/upload would otherwise fill
+# the disk.
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+
+# Localhost CSRF defense: state-changing requests must originate from us
+# (pywebview, or a local browser tab opened to this server). Curl / agent
+# subprocess on the user's own machine sends no Origin → allow.
+_ALLOWED_ORIGINS = {f"http://127.0.0.1:8765", f"http://localhost:8765"}
+
+# Match JWTs (the WB token format is the most common one we'd leak — three
+# base64url chunks separated by dots). Used to scrub credentials out of
+# fatal_error messages before they hit the chat log on disk.
+import re as _re
+_JWT_RE = _re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+
+
+def _scrub_secrets(text: str) -> str:
+    return _JWT_RE.sub("<jwt-redacted>", text)
 
 # File-extension → semantic kind. Used by /api/upload to tag uploads so the
 # UI can pick an icon and the agent can pick a tool (bank_parse_statement
@@ -82,6 +101,20 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Google Workspace Chat Agent", lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def _origin_gate(request, call_next):
+    """Reject state-changing requests with a cross-origin `Origin` header.
+    Localhost-only server, but a malicious page on evil.com could otherwise
+    POST to our endpoints from the user's browser. No-Origin requests
+    (curl, native pywebview shell) pass through."""
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        origin = request.headers.get("origin")
+        if origin and origin not in _ALLOWED_ORIGINS:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "origin not allowed"}, status_code=403)
+    return await call_next(request)
 
 STATIC_DIR = _STATIC_DIR
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -150,7 +183,7 @@ async def chat(req: ChatRequest):
         try:
             await _session.run_turn(message, emit)
         except Exception as e:
-            await emit({"type": "fatal_error", "error": f"{type(e).__name__}: {e}"})
+            await emit({"type": "fatal_error", "error": _scrub_secrets(f"{type(e).__name__}: {e}")})
             await emit({"type": "done"})
 
     asyncio.create_task(runner())
@@ -188,6 +221,21 @@ async def poll_now_api(since_minutes: int = 30):
     return await asyncio.to_thread(watcher.poll_known_scripts, since_minutes)
 
 
+def _safe_relpath(rel: str) -> Path:
+    """Normalize a multipart `filename` so it never escapes the batch dir.
+    Rejects absolute paths, `..` segments, drive letters, and other Windows-
+    specific shenanigans. Returns a relative Path with `/` separators.
+    """
+    rel = (rel or "unnamed").replace("\\", "/").strip("/")
+    p = Path(rel)
+    if p.is_absolute() or any(part in ("..", "") for part in p.parts):
+        raise HTTPException(400, f"unsafe upload filename: {rel!r}")
+    # Reject Windows drive letters like 'C:'
+    if any(":" in part for part in p.parts):
+        raise HTTPException(400, f"unsafe upload filename: {rel!r}")
+    return p
+
+
 @app.post("/api/upload")
 async def upload(files: list[UploadFile] = File(...), folder_name: str | None = Form(None)):
     """Receive file uploads from the chat UI. Saves them under
@@ -200,20 +248,39 @@ async def upload(files: list[UploadFile] = File(...), folder_name: str | None = 
     batch_id = uuid.uuid4().hex[:8]
     batch_dir = UPLOADS_DIR / batch_id
     batch_dir.mkdir(parents=True, exist_ok=True)
+    batch_root = batch_dir.resolve()
 
     saved: list[dict] = []
+    total_bytes = 0
     for f in files:
-        # filename may contain subdirs for folder uploads (webkitRelativePath)
-        rel = f.filename or "unnamed"
-        target = batch_dir / rel
+        rel_path = _safe_relpath(f.filename)
+        target = (batch_dir / rel_path).resolve()
+        # Belt-and-suspenders: even after _safe_relpath, ensure the resolved
+        # path lives under batch_root (catches symlink shenanigans).
+        if not str(target).startswith(str(batch_root)):
+            raise HTTPException(400, f"path escape attempt: {f.filename!r}")
         target.parent.mkdir(parents=True, exist_ok=True)
+
+        bytes_written = 0
         with target.open("wb") as out:
-            shutil.copyfileobj(f.file, out)
+            while True:
+                chunk = await f.read(64 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                bytes_written += len(chunk)
+                if total_bytes > MAX_UPLOAD_BYTES:
+                    # Clean up partial write and refuse
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(413, f"upload exceeds {MAX_UPLOAD_BYTES // (1024*1024)} MB cap")
+                out.write(chunk)
+
         kind = _KIND_BY_SUFFIX.get(target.suffix.lower(), "file")
         saved.append({
-            "name": rel,
-            "path": str(target.resolve()),
-            "size": target.stat().st_size,
+            "name": str(rel_path),
+            "path": str(target),
+            "size": bytes_written,
             "kind": kind,
         })
 
