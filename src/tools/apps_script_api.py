@@ -297,16 +297,6 @@ def triggers_remove(script_id: str, trigger_id: str | None = None, function_name
     """Remove triggers by ID or by handler function name. Returns
     {removed_count}.
     """
-    code = f"""function __remove_triggers() {{
-        var removed = 0;
-        ScriptApp.getProjectTriggers().forEach(function(t) {{
-            var match = {('t.getUniqueId() === ' + json.dumps(trigger_id) if trigger_id else 'false')}
-                     || {('t.getHandlerFunction() === ' + json.dumps(function_name) if function_name else 'false')};
-            if (match) {{ ScriptApp.deleteTrigger(t); removed++; }}
-        }});
-        return {{removed_count: removed}};
-    }}"""
-    # NB the above f-string is fragile — use simpler inline body
     code = (
         "function __remove_triggers() {\n"
         "  var removed = 0;\n"
@@ -562,20 +552,13 @@ def _bound_registry_path():
 
 
 def _bound_registry_load() -> dict[str, dict]:
-    import json as _json
-    p = _bound_registry_path()
-    if not p.exists():
-        return {}
-    try:
-        return _json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    from src.json_store import read_json
+    return read_json(_bound_registry_path(), {})
 
 
 def _bound_registry_save(data: dict) -> None:
-    import json as _json
-    p = _bound_registry_path()
-    p.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    from src.json_store import write_json
+    write_json(_bound_registry_path(), data)
 
 
 def register_bound_script(
@@ -593,12 +576,12 @@ def register_bound_script(
 
     Records: {spreadsheet_id: {script_id, account, registered_at, notes}}.
     """
-    import datetime as _dt
+    from src.json_store import now_iso_z
     reg = _bound_registry_load()
     reg[spreadsheet_id] = {
         "script_id": script_id,
         "account": account,
-        "registered_at": _dt.datetime.utcnow().isoformat() + "Z",
+        "registered_at": now_iso_z(),
         "notes": notes,
     }
     _bound_registry_save(reg)

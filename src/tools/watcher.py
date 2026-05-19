@@ -18,13 +18,10 @@ Requires:
 """
 from __future__ import annotations
 
-import datetime as _dt
-import json
 import re
-from pathlib import Path
-from typing import Any
 
 from src.config import DATA_DIR
+from src.json_store import now_iso_z, read_json, write_json
 from src.tools import cloud_logging
 
 
@@ -41,23 +38,6 @@ FAILURE_PATTERNS = [
     ("error", re.compile(r"\bReferenceError\b"), "ReferenceError"),
     ("warn",  re.compile(r"❌"), "Error log emoji"),
 ]
-
-
-def _now_iso() -> str:
-    return _dt.datetime.utcnow().isoformat() + "Z"
-
-
-def _load_json(path: Path, default):
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-
-
-def _save_json(path: Path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _classify(message: str, severity: str) -> dict | None:
@@ -153,7 +133,7 @@ def list_alerts(unread_only: bool = False, limit: int = 50) -> dict:
     """Return the alerts queue. Newest first. If `unread_only`, hides items
     marked as `read=True`.
     """
-    alerts = _load_json(ALERTS_PATH, [])
+    alerts = read_json(ALERTS_PATH, [])
     if unread_only:
         alerts = [a for a in alerts if not a.get("read")]
     return {"count": len(alerts), "alerts": alerts[:limit]}
@@ -163,28 +143,31 @@ def mark_alerts_read(alert_ids: list[str] | None = None) -> dict:
     """Mark alert(s) as read. If `alert_ids` is None, marks ALL as read.
     Returns {marked, total}.
     """
-    alerts = _load_json(ALERTS_PATH, [])
+    alerts = read_json(ALERTS_PATH, [])
     marked = 0
     for a in alerts:
         if a.get("read"):
             continue
         if alert_ids is None or a.get("id") in alert_ids:
             a["read"] = True
-            a["read_at"] = _now_iso()
+            a["read_at"] = now_iso_z()
             marked += 1
-    _save_json(ALERTS_PATH, alerts)
+    write_json(ALERTS_PATH, alerts)
     return {"marked": marked, "total": len(alerts)}
 
 
 def clear_alerts(read_only: bool = True) -> dict:
     """Remove alerts from the queue. If `read_only`, keeps unread items."""
-    alerts = _load_json(ALERTS_PATH, [])
+    alerts = read_json(ALERTS_PATH, [])
     if read_only:
         kept = [a for a in alerts if not a.get("read")]
     else:
         kept = []
-    _save_json(ALERTS_PATH, kept)
+    write_json(ALERTS_PATH, kept)
     return {"removed": len(alerts) - len(kept), "remaining": len(kept)}
+
+
+MYLIB_SCRIPT_ID = "1iH0_Wcgn_Y8xQMvOinaVremt-e_Axmq6gDN1Dxx-ILROxv8PVQXDxKlN"
 
 
 def _known_scripts() -> list[dict]:
@@ -193,17 +176,13 @@ def _known_scripts() -> list[dict]:
     """
     from src.tools import apps_script_api
     out: list[dict] = []
-    # Bound scripts the agent has learned about
-    reg = apps_script_api._bound_registry_load()
-    for sheet_id, entry in reg.items():
+    for sheet_id, entry in apps_script_api.list_bound_scripts().items():
         out.append({
             "script_id": entry["script_id"],
             "label": f"bound:{sheet_id[:12]}…",
         })
-    # Hard-coded Mylib (library) — always monitor
-    MYLIB = "1iH0_Wcgn_Y8xQMvOinaVremt-e_Axmq6gDN1Dxx-ILROxv8PVQXDxKlN"
-    if not any(s["script_id"] == MYLIB for s in out):
-        out.append({"script_id": MYLIB, "label": "Mylib"})
+    if not any(s["script_id"] == MYLIB_SCRIPT_ID for s in out):
+        out.append({"script_id": MYLIB_SCRIPT_ID, "label": "Mylib"})
     return out
 
 
@@ -220,9 +199,9 @@ def poll_known_scripts(
 
     Returns {checked, new_alerts, total_failures_seen, alerts_added: [...]}.
     """
-    seen: list[str] = _load_json(ALERTS_SEEN_PATH, [])
+    seen: list[str] = read_json(ALERTS_SEEN_PATH, [])
     seen_set = set(seen)
-    alerts = _load_json(ALERTS_PATH, [])
+    alerts = read_json(ALERTS_PATH, [])
 
     known = _known_scripts()
     errors: list[dict] = []
@@ -251,7 +230,7 @@ def poll_known_scripts(
         seen_set.add(aid)
         alert = {
             "id": aid,
-            "created_at": _now_iso(),
+            "created_at": now_iso_z(),
             "script_id": None,  # Cloud Logging doesn't expose it anymore
             "script_label": label,
             "function": fname,
@@ -268,8 +247,11 @@ def poll_known_scripts(
     if len(alerts) > 500:
         alerts = sorted(alerts, key=lambda a: a.get("created_at",""), reverse=True)[:500]
 
-    _save_json(ALERTS_PATH, alerts)
-    _save_json(ALERTS_SEEN_PATH, list(seen_set))
+    # Prune seen_set to the IDs of kept alerts. Older fingerprints can't
+    # re-trigger because Cloud Logging only goes back `since_minutes` (≤ a
+    # few hours in practice); without this, seen_set grows forever.
+    write_json(ALERTS_PATH, alerts)
+    write_json(ALERTS_SEEN_PATH, [a["id"] for a in alerts])
 
     return {
         "checked_scripts": len(known),

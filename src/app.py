@@ -20,6 +20,18 @@ from src.policy import Policy
 UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
+# File-extension → semantic kind. Used by /api/upload to tag uploads so the
+# UI can pick an icon and the agent can pick a tool (bank_parse_statement
+# for pdf, excel_parse for excel, etc.).
+_KIND_BY_SUFFIX = {
+    ".png": "image", ".jpg": "image", ".jpeg": "image",
+    ".gif": "image", ".webp": "image", ".bmp": "image",
+    ".pdf": "pdf",
+    ".xlsx": "excel", ".xls": "excel", ".xlsm": "excel",
+    ".txt": "text", ".md": "text", ".csv": "text",
+    ".json": "text", ".yaml": "text", ".yml": "text", ".log": "text",
+}
+
 logger = logging.getLogger("workspace_agent")
 WATCHER_INTERVAL_SEC = 300  # 5 min between Cloud Logging polls
 WATCHER_LOOKBACK_MIN = 30   # how far back each poll looks
@@ -197,12 +209,7 @@ async def upload(files: list[UploadFile] = File(...), folder_name: str | None = 
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as out:
             shutil.copyfileobj(f.file, out)
-        suffix = target.suffix.lower()
-        kind = "image" if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"} \
-            else "pdf" if suffix == ".pdf" \
-            else "excel" if suffix in {".xlsx", ".xls", ".xlsm"} \
-            else "text" if suffix in {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".log"} \
-            else "file"
+        kind = _KIND_BY_SUFFIX.get(target.suffix.lower(), "file")
         saved.append({
             "name": rel,
             "path": str(target.resolve()),

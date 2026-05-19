@@ -17,16 +17,23 @@ Typical workflow:
 """
 from __future__ import annotations
 
-import datetime as _dt
-import json
 from pathlib import Path
 from typing import Any
 
 from src.config import DATA_DIR
+from src.json_store import now_iso_z, read_json, write_json
 
 
 REPORTS_DIR = DATA_DIR / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
+
+# Kind dirs we check before falling back to rglob in load_report. Keep in
+# sync with what callers actually use.
+_KNOWN_KINDS = ("bank", "abc", "sales", "expenses", "combined")
+
+
+def _safe_name(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
 
 
 def _kind_dir(kind: str) -> Path:
@@ -48,23 +55,22 @@ def save_report(
 
     Returns {name, kind, path, saved_at, bytes}.
     """
-    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    safe = _safe_name(name)
     payload = {
-        "name": safe_name,
+        "name": safe,
         "kind": kind,
-        "saved_at": _dt.datetime.utcnow().isoformat() + "Z",
+        "saved_at": now_iso_z(),
         "metadata": metadata or {},
         "data": data,
     }
-    p = _kind_dir(kind) / f"{safe_name}.json"
-    raw = json.dumps(payload, ensure_ascii=False, indent=2)
-    p.write_text(raw, encoding="utf-8")
+    p = _kind_dir(kind) / f"{safe}.json"
+    write_json(p, payload)
     return {
-        "name": safe_name,
+        "name": safe,
         "kind": kind,
         "path": str(p.resolve()),
         "saved_at": payload["saved_at"],
-        "bytes": len(raw.encode("utf-8")),
+        "bytes": p.stat().st_size,
     }
 
 
@@ -73,14 +79,17 @@ def load_report(name: str, kind: str | None = None) -> dict:
     otherwise scans all kinds. Returns the full payload {name, kind, saved_at,
     metadata, data}. Raises FileNotFoundError if not found.
     """
-    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    safe = _safe_name(name)
     if kind:
-        candidates = [_kind_dir(kind) / f"{safe_name}.json"]
+        candidates = [_kind_dir(kind) / f"{safe}.json"]
     else:
-        candidates = list(REPORTS_DIR.rglob(f"{safe_name}.json"))
+        # Try known kinds first (O(1) per kind), only rglob if all miss
+        candidates = [REPORTS_DIR / k / f"{safe}.json" for k in _KNOWN_KINDS]
+        candidates += list(REPORTS_DIR.rglob(f"{safe}.json"))
     for p in candidates:
-        if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
+        payload = read_json(p, None)
+        if payload is not None:
+            return payload
     raise FileNotFoundError(f"Report {name!r} not found (kind={kind!r})")
 
 
@@ -94,9 +103,8 @@ def list_reports(kind: str | None = None, limit: int = 50) -> dict:
         paths = list(REPORTS_DIR.rglob("*.json"))
     out: list[dict] = []
     for p in paths:
-        try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
+        payload = read_json(p, None)
+        if payload is None:
             continue
         out.append({
             "name": payload.get("name", p.stem),
@@ -111,17 +119,17 @@ def list_reports(kind: str | None = None, limit: int = 50) -> dict:
 
 def delete_report(name: str, kind: str | None = None) -> dict:
     """Delete a saved report. Returns {deleted, name}."""
-    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    safe = _safe_name(name)
     if kind:
-        candidates = [_kind_dir(kind) / f"{safe_name}.json"]
+        candidates = [_kind_dir(kind) / f"{safe}.json"]
     else:
-        candidates = list(REPORTS_DIR.rglob(f"{safe_name}.json"))
-    deleted = []
+        candidates = list(REPORTS_DIR.rglob(f"{safe}.json"))
+    deleted: list[str] = []
     for p in candidates:
         if p.exists():
             p.unlink()
             deleted.append(str(p))
-    return {"deleted": len(deleted) > 0, "name": safe_name, "files": deleted}
+    return {"deleted": len(deleted) > 0, "name": safe, "files": deleted}
 
 
 def combine_reports(

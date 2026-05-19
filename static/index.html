@@ -1199,7 +1199,7 @@ function Composer({ disabled, onSend }) {
       id: crypto.randomUUID(),
       name: f.webkitRelativePath || f.name,
       size: f.size,
-      kind: guessKind(f.name),
+      kind: "file",  // placeholder; server returns real kind on upload finish
       uploading: true,
     }));
     setAttachments(prev => [...prev, ...pending]);
@@ -1237,15 +1237,6 @@ function Composer({ disabled, onSend }) {
         a.uploading ? { ...a, uploading: false, error: String(e).slice(0, 80) } : a
       ));
     }
-  };
-
-  const guessKind = (name) => {
-    const ext = (name || "").toLowerCase().split(".").pop();
-    if (["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(ext)) return "image";
-    if (ext === "pdf") return "pdf";
-    if (["xlsx", "xls", "xlsm"].includes(ext)) return "excel";
-    if (["txt", "md", "csv", "json", "yaml", "yml", "log"].includes(ext)) return "text";
-    return "file";
   };
 
   const removeAttachment = (id) => {
@@ -1497,13 +1488,23 @@ function App() {
   }, []);
 
   /* ── poll alerts: every 30s + on mount. Background watcher writes to
-        alerts.json from Cloud Logging; we surface them here.            */
+        alerts.json from Cloud Logging; we surface them here. SSE pushes
+        them in real-time too — poll only serves as catch-up on tab reload.
+        Skip the setAlerts call if the payload didn't change, so we don't
+        force a banner re-render on every tick.                          */
   useEffect(() => {
     let cancelled = false;
+    let lastSig = "";
     const tick = () => {
       fetch("/api/alerts?unread_only=false&limit=20")
         .then(r => r.ok ? r.json() : null)
-        .then(j => { if (!cancelled && j) setAlerts(j.alerts || []); })
+        .then(j => {
+          if (cancelled || !j) return;
+          const sig = JSON.stringify(j.alerts || []);
+          if (sig === lastSig) return;
+          lastSig = sig;
+          setAlerts(j.alerts || []);
+        })
         .catch(() => {});
     };
     tick();

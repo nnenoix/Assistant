@@ -10,13 +10,11 @@ import json
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src import auth
-from src import auth as _auth
 from src.tools import (
     analytics, apps_script, apps_script_api, bank_parser, browser, calendar,
     chats, cloud_logging, drive, excel, gcp, gmail, local_fs, macros, notes,
     people, reports, sheets, watcher, wb,
 )
-from src.tools import bank_parser as _bank_parser  # alias
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -1182,21 +1180,21 @@ TOOLS = [
     ),
     _tool(
         "auth_describe_account",
-        _auth.describe_account,
+        auth.describe_account,
         "auth.list",
         "Identify which Google account is bound to a token alias. Returns {email, name, scopes}. Use after auth_add_account to verify the consent screen picked the right account (we've been burned by accidentally picking the wrong one).",
         {"type": "object", "properties": {"account": {"type": "string", "default": "main"}}},
     ),
     _tool(
         "auth_list_accounts_with_identity",
-        _auth.list_accounts_with_identity,
+        auth.list_accounts_with_identity,
         "auth.list",
         "Like auth_list_accounts but also fetches each alias's bound email + name. One-stop 'who is what'.",
         {"type": "object", "properties": {}},
     ),
     _tool(
         "auth_add_account_incremental",
-        _auth.add_account_incremental,
+        auth.add_account_incremental,
         "auth.add",
         "Re-authorize an account adding NEW scopes while preserving existing grants (Google's incremental authorization with include_granted_scopes=true). Cleaner than delete+re-add — the user only sees the new scopes in the consent screen.",
         {
