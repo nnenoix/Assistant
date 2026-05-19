@@ -190,6 +190,47 @@ async def chat(req: ChatRequest):
     return {"run_id": run_id}
 
 
+@app.get("/api/setup/status")
+async def setup_status_api():
+    """One-stop check for the welcome wizard. Returns whether Claude CLI is
+    on PATH, OAuth client bundled, and main token granted. `complete=True`
+    when chat is ready to use."""
+    from src import setup
+    return setup.check_setup_status()
+
+
+@app.post("/api/setup/install_claude")
+async def setup_install_claude_api():
+    """Install Claude Code natively via Anthropic's PowerShell bootstrap.
+    Blocks until done (no console window). Returns the same shape as the
+    setup.install_claude_cli function.
+    """
+    from src import setup
+    return await asyncio.to_thread(setup.install_claude_cli)
+
+
+@app.post("/api/setup/login_claude")
+async def setup_login_claude_api():
+    """Run `claude login` — opens a browser tab for Anthropic OAuth, waits
+    for the user to consent, captures the callback. No console window.
+    """
+    from src import setup
+    return await asyncio.to_thread(setup.login_claude)
+
+
+@app.post("/api/setup/start_oauth")
+async def setup_start_oauth_api():
+    """Trigger Google OAuth for alias='main' from the wizard. Blocks
+    until the user finishes the browser consent (or it times out).
+    Returns {ok, bound_email?, error?}.
+    """
+    try:
+        result = await asyncio.to_thread(auth.add_account, "main")
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+
+
 @app.get("/api/alerts")
 async def list_alerts_api(unread_only: bool = False, limit: int = 50):
     """Return queued failure alerts. UI polls this every 30s to show the

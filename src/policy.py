@@ -5,13 +5,22 @@ from typing import Any
 
 # Built-in defaults merged into the user's allowlist.json on load. The user
 # can override any category by listing it in their file — these only fill
-# in MISSING categories so new features don't silently 403 on existing
-# installs (.data/allowlist.json is gitignored, hence the inline defaults).
+# in MISSING categories. Fresh installs (where .data/allowlist.json doesn't
+# exist yet) get a sane policy out of the box: reads are wildcard-allowed,
+# writes/deletes prompt via approval modal.
 _DEFAULTS: dict[str, dict] = {
+    "drive":       {"read": "*", "create": [], "update": [], "delete": []},
+    "sheets":      {"read": "*", "write": []},
+    "local":       {"read": [".", ".data/staging", ".data/uploads"], "write": [".data/staging", ".data/uploads"]},
+    "apps_script": {"edit": [], "run": []},
+    "auth":        {"list": "*", "add": [], "remove": []},
+    "chats":       {"read": "*"},
+    "notes":       {"read": "*", "write": "*"},
+    "people":      {"read": "*", "write": "*"},
+    "gmail":       {"read": "*", "draft": "*", "send": []},
+    "calendar":    {"read": "*", "write": "*", "delete": []},
     "self": {
-        # Read/test/diff are safe (no side effects) — auto-allow.
-        # Edit/commit/revert mutate code → empty list = always prompt.
-        "read": ["src", "static"],   # relative paths resolved against PROJECT_ROOT
+        "read": ["src", "static"],
         "test": "*",
         "diff": "*",
         "edit": [],
@@ -32,13 +41,15 @@ def _apply_defaults(rules: dict) -> dict:
                 if action not in merged:
                     merged[action] = default_val
             out[cat] = merged
-    # Resolve `self.read` paths to absolute (relative to project root)
+    # Resolve relative paths in self.read + local.read/write against PROJECT_ROOT
     from src.config import PROJECT_ROOT
-    if isinstance(out.get("self", {}).get("read"), list):
-        out["self"]["read"] = [
-            str((PROJECT_ROOT / p).resolve()) if not Path(p).is_absolute() else p
-            for p in out["self"]["read"]
-        ]
+    for cat, action in (("self", "read"), ("local", "read"), ("local", "write")):
+        val = out.get(cat, {}).get(action)
+        if isinstance(val, list):
+            out[cat][action] = [
+                str((PROJECT_ROOT / p).resolve()) if not Path(p).is_absolute() else p
+                for p in val
+            ]
     return out
 
 

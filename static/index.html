@@ -633,6 +633,68 @@
     font-size: 11.5px;
   }
 
+  /* ── first-run wizard ─────────────────────────────────────────── */
+  .wiz-wrap {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .wiz {
+    width: 100%; max-width: 540px;
+    padding: 48px 36px;
+    text-align: center;
+  }
+  .wiz h1 { font-size: 28px; margin-bottom: 32px; font-weight: 600; }
+  .wiz .step-num {
+    color: var(--text-3); font-size: 13px;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 14px;
+  }
+  .wiz .step-title { font-size: 22px; font-weight: 500; margin-bottom: 8px; }
+  .wiz .step-sub { color: var(--text-2); font-size: 14px; margin-bottom: 32px; }
+  .wiz .big-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 8px;
+    min-width: 220px;
+    padding: 14px 28px;
+    background: var(--primary);
+    color: white;
+    border: 0;
+    border-radius: 10px;
+    font-size: 15px; font-weight: 500;
+    cursor: pointer;
+    transition: background .12s, transform .12s;
+  }
+  .wiz .big-btn:hover:not(:disabled) { background: #1d4fd8; }
+  .wiz .big-btn:active:not(:disabled) { transform: scale(.97); }
+  .wiz .big-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .wiz .big-btn .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid currentColor; border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  .wiz .err {
+    margin-top: 18px;
+    color: var(--danger-text);
+    font-size: 13px;
+    background: var(--danger-soft);
+    border: 1px solid rgba(185, 28, 28, 0.4);
+    border-radius: 8px;
+    padding: 10px 12px;
+    text-align: left;
+  }
+  .wiz .progress {
+    display: flex; justify-content: center; gap: 8px; margin-bottom: 40px;
+  }
+  .wiz .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--border-2);
+  }
+  .wiz .dot.active { background: var(--primary); }
+  .wiz .dot.done { background: var(--ok-text); }
+
   /* alerts banner — pushed by background watcher when a monitored
      Apps Script logs a failure (Exception, 429-stop, SyntaxError, ...) */
   .alerts-wrap {
@@ -1431,6 +1493,103 @@ function Turn({ turn, isLast, isStreaming, awaitingFirstReply }) {
   `;
 }
 
+/* ── first-run wizard — installs Claude Code, logs into Anthropic +
+       Google. Renders before <App> when /api/setup/status is incomplete. */
+function SetupWizard({ status, onDone }) {
+  const [busy, setBusy] = useState(null);   // which button is spinning
+  const [err, setErr] = useState(null);
+
+  // Re-fetch status from server (used after each action)
+  const refetch = useCallback(async () => {
+    const r = await fetch("/api/setup/status").then(r => r.json());
+    onDone(r);
+    return r;
+  }, [onDone]);
+
+  const run = async (key, url) => {
+    setBusy(key); setErr(null);
+    try {
+      const r = await fetch(url, { method: "POST" }).then(r => r.json());
+      if (!r.ok) {
+        setErr(r.error || "Что-то пошло не так. Попробуй ещё раз.");
+      }
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+      await refetch();
+    }
+  };
+
+  // Decide which step to show
+  const haveClaudeCli   = status?.claude_cli?.installed;
+  const haveOauthClient = status?.oauth_client?.present;
+  const haveMainToken   = status?.main_token?.present;
+
+  let stepNum, stepTitle, stepSub, button;
+  if (!haveClaudeCli) {
+    stepNum = 1;
+    stepTitle = "Установка Claude Code";
+    stepSub = "Скачаю и установлю официальный CLI от Anthropic (~30–60 сек). Это та программа, которая на самом деле общается с моделью.";
+    button = {
+      label: busy === "install" ? "Устанавливаю…" : "Установить",
+      onClick: () => run("install", "/api/setup/install_claude"),
+      key: "install",
+    };
+  } else if (!haveOauthClient) {
+    stepNum = "!";
+    stepTitle = "Не хватает OAuth-клиента";
+    stepSub = "В папке с программой нет файла client_secret_*.json. Положи его рядом с workspace_agent.exe и нажми «Проверить».";
+    button = {
+      label: busy === "recheck" ? "Проверяю…" : "Проверить",
+      onClick: () => run("recheck", "/api/setup/status"),  // GET would also work
+      key: "recheck",
+    };
+  } else if (!haveMainToken) {
+    stepNum = 2;
+    stepTitle = "Войди в Claude и Google";
+    stepSub = "Сначала выйдет окно браузера для Anthropic (Pro/Max подписка). Потом — для Google (твой Drive и Sheets).";
+    button = {
+      label: busy === "login_claude"
+        ? "Жду Claude…"
+        : busy === "login_google"
+          ? "Жду Google…"
+          : "Войти",
+      onClick: async () => {
+        setBusy("login_claude"); setErr(null);
+        const c = await fetch("/api/setup/login_claude", { method: "POST" }).then(r => r.json());
+        if (!c.ok) { setErr("Claude login: " + (c.error || "ошибка")); setBusy(null); return; }
+        setBusy("login_google");
+        const g = await fetch("/api/setup/start_oauth", { method: "POST" }).then(r => r.json());
+        if (!g.ok) { setErr("Google login: " + (g.error || "ошибка")); }
+        setBusy(null);
+        await refetch();
+      },
+      key: "login_claude",
+    };
+  }
+
+  return html`
+    <div class="wiz-wrap">
+      <div class="wiz">
+        <h1>Workspace Agent</h1>
+        <div class="progress">
+          <div class=${"dot " + (haveClaudeCli ? "done" : "active")}></div>
+          <div class=${"dot " + (haveMainToken ? "done" : haveClaudeCli ? "active" : "")}></div>
+        </div>
+        <div class="step-num">Шаг ${stepNum}</div>
+        <div class="step-title">${stepTitle}</div>
+        <div class="step-sub">${stepSub}</div>
+        <button class="big-btn" disabled=${!!busy} onClick=${button.onClick}>
+          ${busy === button.key && html`<span class="spinner"></span>`}
+          ${button.label}
+        </button>
+        ${err && html`<div class="err">${err}</div>`}
+      </div>
+    </div>
+  `;
+}
+
 /* ── main app ────────────────────────────────────────────────────── */
 function App() {
   // turns: [{role:'user', text}, {role:'assistant', events:[]}]
@@ -1451,6 +1610,15 @@ function App() {
     if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) return "light";
     return "dark";
   });
+  // null = still loading; object = loaded; .complete drives whether the
+  // wizard or the chat renders.
+  const [setupStatus, setSetupStatus] = useState(null);
+  useEffect(() => {
+    fetch("/api/setup/status")
+      .then(r => r.ok ? r.json() : null)
+      .then(j => setSetupStatus(j || { complete: true }))
+      .catch(() => setSetupStatus({ complete: true }));  // fall through on error
+  }, []);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -1772,6 +1940,15 @@ function App() {
     }
     return -1;
   }, [turns]);
+
+  // First-run gate: while we don't know setup state, show nothing. Once
+  // we know and it's incomplete, show the wizard. Wizard's onDone updates
+  // setupStatus; the moment status.complete flips true, this branch falls
+  // through to the chat.
+  if (setupStatus === null) return null;
+  if (!setupStatus.complete) {
+    return html`<${SetupWizard} status=${setupStatus} onDone=${setSetupStatus} />`;
+  }
 
   return html`
     <div class="app">

@@ -43,9 +43,18 @@ hidden_imports = [
 datas = [
     ("static", "static"),
     ("src/tools/bank_parsers", "src/tools/bank_parsers"),
-    # OAuth client_secret is NOT bundled (would expose creds to anyone with
-    # the exe). User copies their own client_secret_*.json next to the exe.
 ]
+
+# OAuth client_secret: bundle the dev's Desktop-app client into the exe
+# (Google docs are explicit that the client_secret of a Desktop app is
+# not actually secret — see https://developers.google.com/identity/protocols/
+# oauth2/native-app). End-users sign in with their OWN Google accounts.
+# A "this app is not verified" screen appears once unless the user is in
+# the OAuth consent screen's Test Users list (up to 100).
+import glob as _glob
+for _cs in _glob.glob("client_secret_*.apps.googleusercontent.com.json"):
+    datas.append((_cs, "."))
+    break  # only one expected
 
 # Collect data files from packages that ship data alongside Python code
 for pkg in ("googleapiclient", "google_auth_oauthlib", "pdfplumber",

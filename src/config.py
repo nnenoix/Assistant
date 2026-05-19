@@ -37,17 +37,22 @@ SCRIPTS_DIR = DATA_DIR / "scripts"
 ALLOWLIST_PATH = DATA_DIR / "allowlist.json"
 STATIC_DIR = BUNDLE_ROOT / "static"
 
-# OAuth client secret file — match by glob, the engineer has only one
-CLIENT_SECRET_PATH = next(
-    PROJECT_ROOT.glob("client_secret_*.apps.googleusercontent.com.json"),
-    None,
-)
-if CLIENT_SECRET_PATH is None:
-    raise FileNotFoundError(
-        "OAuth client secret file not found in project root. "
-        "Download it from Google Cloud Console and place it as "
-        "client_secret_*.apps.googleusercontent.com.json"
-    )
+# OAuth client secret. Search order:
+#  1. Next to the exe (user dropped a custom client there)
+#  2. Bundled with the build (PyInstaller datas — Desktop-app client)
+#  3. Project root in source mode
+# Missing client is no longer fatal — the wizard will surface the issue
+# in the UI instead of crashing at import time.
+def _find_client_secret() -> Path | None:
+    for root in (PROJECT_ROOT, BUNDLE_ROOT):
+        try:
+            return next(root.glob("client_secret_*.apps.googleusercontent.com.json"))
+        except StopIteration:
+            continue
+    return None
+
+
+CLIENT_SECRET_PATH = _find_client_secret()
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
