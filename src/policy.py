@@ -3,9 +3,48 @@ from pathlib import Path
 from typing import Any
 
 
+# Built-in defaults merged into the user's allowlist.json on load. The user
+# can override any category by listing it in their file — these only fill
+# in MISSING categories so new features don't silently 403 on existing
+# installs (.data/allowlist.json is gitignored, hence the inline defaults).
+_DEFAULTS: dict[str, dict] = {
+    "self": {
+        # Read/test/diff are safe (no side effects) — auto-allow.
+        # Edit/commit/revert mutate code → empty list = always prompt.
+        "read": ["src", "static"],   # relative paths resolved against PROJECT_ROOT
+        "test": "*",
+        "diff": "*",
+        "edit": [],
+        "commit": [],
+        "revert": [],
+    },
+}
+
+
+def _apply_defaults(rules: dict) -> dict:
+    out = dict(rules)
+    for cat, actions in _DEFAULTS.items():
+        if cat not in out:
+            out[cat] = dict(actions)
+        else:
+            merged = dict(out[cat])
+            for action, default_val in actions.items():
+                if action not in merged:
+                    merged[action] = default_val
+            out[cat] = merged
+    # Resolve `self.read` paths to absolute (relative to project root)
+    from src.config import PROJECT_ROOT
+    if isinstance(out.get("self", {}).get("read"), list):
+        out["self"]["read"] = [
+            str((PROJECT_ROOT / p).resolve()) if not Path(p).is_absolute() else p
+            for p in out["self"]["read"]
+        ]
+    return out
+
+
 class Policy:
     def __init__(self, rules: dict[str, dict[str, list[str] | str]]):
-        self._rules = rules
+        self._rules = _apply_defaults(rules)
 
     @classmethod
     def load(cls, path: Path) -> "Policy":
@@ -53,4 +92,17 @@ class Policy:
             return False
         if category == "apps_script":
             return args.get("script_id") in allow
+        if category == "self":
+            # Self-healing tools work on `path` inside src/ — the tool itself
+            # already enforces the src/static boundary, so here we only check
+            # the same path-prefix model used for local.*.
+            target = args.get("path", "")
+            if not target:
+                return action == "read"  # status/diff w/o path = ok if read allowed
+            target_norm = Path(target).resolve().as_posix().lower()
+            for root in allow:
+                root_norm = Path(root).resolve().as_posix().lower()
+                if target_norm == root_norm or target_norm.startswith(root_norm + "/"):
+                    return True
+            return False
         return False

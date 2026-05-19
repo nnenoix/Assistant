@@ -13,7 +13,7 @@ from src import auth
 from src.tools import (
     analytics, apps_script, apps_script_api, bank_parser, browser, calendar,
     chats, cloud_logging, drive, excel, gcp, gmail, local_fs, macros, notes,
-    people, reports, sheets, watcher, wb,
+    people, reports, self_heal, sheets, watcher, wb,
 )
 
 
@@ -549,6 +549,76 @@ TOOLS = [
                 "timeout_sec": {"type": "integer", "default": 300},
             },
         },
+    ),
+    # --- Self-healing: agent edits its own source code ---
+    _tool(
+        "self_read_source",
+        self_heal.self_read_source,
+        "self.read",
+        "Read a source file from this project (under `src/` or `static/`). Returns {path, content, lines, bytes}. Use as the first step when fixing a bug in the agent itself or its UI.",
+        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
+    _tool(
+        "self_edit_source",
+        self_heal.self_edit_source,
+        "self.edit",
+        "Replace the contents of a source file (under `src/` or `static/`). USER APPROVAL REQUIRED. After editing, ALWAYS call self_smoke_test to verify the change still imports cleanly. The running process keeps old code in memory until the user restarts the app.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "new_content": {"type": "string", "description": "Full file content. Make sure to preserve existing code outside the area you're fixing."},
+            },
+            "required": ["path", "new_content"],
+        },
+    ),
+    _tool(
+        "self_smoke_test",
+        self_heal.self_smoke_test,
+        "self.test",
+        "Spawn a fresh Python and verify `src.app` imports cleanly. Returns {ok, exit_code, stdout, stderr}. ALWAYS run after self_edit_source — catches syntax errors and missing imports.",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "self_git_diff",
+        self_heal.self_git_diff,
+        "self.diff",
+        "Show pending changes vs HEAD. `staged=True` shows the index; default shows the working tree. `path` narrows to one file. Returns {diff, files_changed, truncated}.",
+        {
+            "type": "object",
+            "properties": {
+                "staged": {"type": "boolean", "default": False},
+                "path": {"type": "string"},
+            },
+        },
+    ),
+    _tool(
+        "self_git_status",
+        self_heal.self_git_status,
+        "self.diff",
+        "`git status --short` — list modified / untracked files. Cheap, no approval.",
+        {"type": "object", "properties": {}},
+    ),
+    _tool(
+        "self_git_commit",
+        self_heal.self_git_commit,
+        "self.commit",
+        "Stage given `paths` (or all changed tracked files if omitted) and commit with `message`. USER APPROVAL REQUIRED. Adds a 'Co-Authored-By: Claude (self-healing)' line automatically.",
+        {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+                "paths": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["message"],
+        },
+    ),
+    _tool(
+        "self_git_revert",
+        self_heal.self_git_revert,
+        "self.revert",
+        "Discard unstaged changes to `path` (git checkout HEAD -- path). USER APPROVAL REQUIRED. Use when self_smoke_test failed after an edit.",
+        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
     ),
     _tool(
         "apps_script_api_find_bound_script",
