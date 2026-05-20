@@ -1207,12 +1207,21 @@ function AccountsModal({ open, onClose }) {
   const [error, setError] = useState(null);
 
   const fetchAccounts = useCallback(async () => {
-    try {
-      const r = await fetch("/api/accounts/detailed");
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setData(await r.json());
-    } catch (e) {
-      setError(String(e));
+    // Retry on transient errors (server still booting, port races, etc.)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await fetch("/api/accounts/detailed");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        setData(await r.json());
+        setError(null);
+        return;
+      } catch (e) {
+        if (attempt === 2) {
+          setError("Сервер не отвечает. Если только что запустил приложение — подожди 5 сек и нажми «Привязать» ещё раз. Если не помогает — закрой приложение и открой заново.");
+        } else {
+          await new Promise(r => setTimeout(r, 1500));
+        }
+      }
     }
   }, []);
 
