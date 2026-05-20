@@ -1198,8 +1198,136 @@ function ApprovalModal({ req, onResolve }) {
   `;
 }
 
+/* ── accounts modal — in-app Google account manager
+       (was a separate /accounts page that opened in the system browser;
+        moved here so the user stays inside the pywebview window) ────── */
+function AccountsModal({ open, onClose }) {
+  const [data, setData] = useState(null);        // { alias: { email, name, scopes, error? } }
+  const [newAlias, setNewAlias] = useState("");
+  const [busy, setBusy] = useState(null);        // alias being mutated
+  const [error, setError] = useState(null);
+
+  const fetchAccounts = useCallback(async () => {
+    try {
+      const r = await fetch("/api/accounts/detailed");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setData(await r.json());
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  useEffect(() => { if (open) { setError(null); fetchAccounts(); } }, [open, fetchAccounts]);
+
+  if (!open) return null;
+
+  const addAccount = async () => {
+    const alias = newAlias.trim();
+    if (!alias) return;
+    if (/[/\\:*?"<>|]/.test(alias)) {
+      setError("Имя не должно содержать /\\:*?\"<>|"); return;
+    }
+    setBusy("__add__"); setError(null);
+    try {
+      const r = await fetch("/api/accounts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ alias }),
+      }).then(r => r.json());
+      if (!r.ok) setError(r.error || "Не получилось добавить");
+      setNewAlias("");
+      await fetchAccounts();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeAccount = async (alias) => {
+    if (!confirm(`Удалить аккаунт ${alias}?`)) return;
+    setBusy(alias);
+    try {
+      await fetch(`/api/accounts/${encodeURIComponent(alias)}`, { method: "DELETE" });
+      await fetchAccounts();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const entries = data ? Object.entries(data) : [];
+
+  return html`
+    <div class="modal-backdrop" onClick=${(e) => { if (e.target.classList.contains("modal-backdrop")) onClose(); }}>
+      <div class="modal" style="max-width: 600px;">
+        <div class="modal-head">
+          <div class="modal-eyebrow">
+            <${Icon} name="user" />
+            Google аккаунты
+          </div>
+          <h2>Привязанные аккаунты</h2>
+          <div class="modal-policy">Каждый = один OAuth-токен под коротким именем. Агент может работать с любым.</div>
+        </div>
+        <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
+          ${data === null && html`<div class="phase">Загружаю…</div>`}
+          ${entries.length === 0 && data !== null && html`
+            <div class="phase">Аккаунтов нет. Добавь первый.</div>
+          `}
+          ${entries.map(([alias, info]) => html`
+            <div key=${alias} style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border);">
+              <div style="min-width: 0;">
+                <div style="font-weight: 600;">${alias}</div>
+                <div style="color: var(--text-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  ${info?.email || (info?.error ? `⚠ ${info.error.slice(0, 60)}` : "—")}
+                  ${info?.name && html` · <span style="color: var(--text-3);">${info.name}</span>`}
+                </div>
+              </div>
+              <button
+                class="header-link"
+                style="background: var(--danger-soft); color: var(--danger-text); border-color: rgba(185,28,28,0.4);"
+                disabled=${busy === alias}
+                onClick=${() => removeAccount(alias)}
+              >
+                ${busy === alias ? "…" : "Удалить"}
+              </button>
+            </div>
+          `)}
+
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-weight: 600; margin-bottom: 6px;">Привязать новый Google-аккаунт</div>
+            <div style="color: var(--text-2); font-size: 12.5px; margin-bottom: 12px;">
+              Введи короткое имя (work, mom, varychev), потом откроется браузер для входа в Google.
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <input
+                type="text"
+                placeholder="например, work"
+                value=${newAlias}
+                onInput=${(e) => setNewAlias(e.target.value)}
+                onKeyDown=${(e) => { if (e.key === "Enter") addAccount(); }}
+                disabled=${busy === "__add__"}
+                style="flex: 1; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 14px;"
+              />
+              <button class="big-btn" style="min-width: 130px;" disabled=${busy === "__add__" || !newAlias.trim()} onClick=${addAccount}>
+                ${busy === "__add__" ? html`<span class="spinner"></span> Жду Google…` : "Добавить"}
+              </button>
+            </div>
+          </div>
+
+          ${error && html`<div class="err" style="margin-top: 12px;">${error}</div>`}
+        </div>
+        <div class="modal-foot" style="display: flex; justify-content: flex-end; padding: 14px 20px; border-top: 1px solid var(--border);">
+          <button class="header-link" onClick=${onClose}>Закрыть</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 /* ── header ──────────────────────────────────────────────────────── */
-function Header({ accounts, theme, onToggleTheme, model, models, onSelectModel, modelBusy }) {
+function Header({ accounts, theme, onToggleTheme, model, models, onSelectModel, modelBusy, onOpenAccounts }) {
   const currentLabel = models.find(m => m.alias === model)?.label || model;
   return html`
     <header class="header">
@@ -1228,9 +1356,9 @@ function Header({ accounts, theme, onToggleTheme, model, models, onSelectModel, 
           aria-label="Тема">
           <${Icon} name=${theme === "light" ? "moon" : "sun"} />
         </button>
-        <a class="header-link" href="/accounts" target="_blank" rel="noopener">
+        <button class="header-link" onClick=${onOpenAccounts}>
           <${Icon} name="user" /> Аккаунты
-        </a>
+        </button>
       </div>
     </header>
   `;
@@ -1715,6 +1843,7 @@ function App() {
   // null = still loading; object = loaded; .complete drives whether the
   // wizard or the chat renders.
   const [setupStatus, setSetupStatus] = useState(null);
+  const [accountsOpen, setAccountsOpen] = useState(false);
   useEffect(() => {
     fetch("/api/setup/status")
       .then(r => r.ok ? r.json() : null)
@@ -2062,6 +2191,7 @@ function App() {
         models=${models}
         onSelectModel=${onSelectModel}
         modelBusy=${modelBusy}
+        onOpenAccounts=${() => setAccountsOpen(true)}
       />
       <div class="log-wrap" ref=${logRef}>
         ${!hasMessages ? html`<${EmptyState} />` : html`
@@ -2090,6 +2220,7 @@ function App() {
       <${AlertsBanner} alerts=${alerts} onDiscuss=${askAboutAlert} onDismiss=${dismissAlert} onClearAll=${dismissAllAlerts} />
       <${Composer} disabled=${inputDisabled} onSend=${sendMessage} />
       <${ApprovalModal} req=${currentApproval} onResolve=${onApprovalResolve} />
+      <${AccountsModal} open=${accountsOpen} onClose=${() => { setAccountsOpen(false); fetch("/api/accounts").then(r => r.json()).then(j => setAccounts(j.accounts || [])).catch(() => {}); }} />
     </div>
   `;
 }

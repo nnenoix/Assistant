@@ -386,6 +386,14 @@ async def list_accounts_api():
     return {"accounts": auth.list_accounts()}
 
 
+@app.get("/api/accounts/detailed")
+async def list_accounts_detailed_api():
+    """Each alias enriched with the bound Google identity (email + display
+    name) via Drive about().get. Slow when there are many aliases — used
+    by the in-app Accounts modal."""
+    return await asyncio.to_thread(auth.list_accounts_with_identity)
+
+
 @app.post("/api/accounts")
 async def add_account_api(req: AddAccountRequest):
     alias = req.alias.strip()
