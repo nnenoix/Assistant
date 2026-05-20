@@ -161,25 +161,41 @@ def login_claude() -> dict:
     supported on the current process.stdin". So we spawn a fresh cmd.exe
     window where the user can follow the prompts.
 
-    Returns immediately (spawned process runs independently). UI shows the
-    user a "Done" button — clicking it calls check_claude_auth() to verify.
+    Implementation note: we write a small .bat file to %TEMP% and run it,
+    instead of building a `cmd /k "..."` argv. Quoting paths inside an
+    argv-via-cmd string gets mangled by Windows (double quotes around an
+    exe path become "C:\\path\\claude.EXE" which cmd treats as a command
+    name, not a path). The .bat sidesteps it entirely.
     """
     exe = _find_claude_exe()
     if not exe:
         return {"ok": False, "error": "Claude Code not installed yet — finish step 1 first"}
 
     try:
-        # Wrap in cmd /k so the window stays open after setup-token exits
-        # (lets the user see "Done" before closing). Detached from us.
+        import tempfile
+        bat = Path(tempfile.gettempdir()) / "workspace_agent_claude_login.bat"
+        # newline='' disables Python's automatic \n→\r\n translation; we
+        # emit \r\n explicitly so we get exactly ONE CRLF per line.
+        with bat.open("w", encoding="utf-8", newline="") as f:
+            f.write("@echo off\r\n")
+            f.write("chcp 65001 > nul\r\n")
+            f.write(f'"{exe}" setup-token\r\n')
+            f.write("echo.\r\n")
+            f.write("echo ============================================\r\n")
+            f.write("echo  Готово! Можешь закрыть это окно.\r\n")
+            f.write("echo  Workspace Agent сам подхватит вход через 5 сек.\r\n")
+            f.write("echo ============================================\r\n")
+            f.write("pause\r\n")
         subprocess.Popen(
-            ["cmd.exe", "/k", f'"{exe}" setup-token & echo. & echo Готово! Можешь закрыть это окно. & pause'],
+            ["cmd.exe", "/c", "start", "", "cmd.exe", "/k", str(bat)],
             creationflags=_CREATE_NEW_CONSOLE,
             close_fds=True,
         )
         return {
             "ok": True,
             "spawned": True,
-            "message": "Открыл терминал с Claude. Следуй инструкциям там, потом нажми «Готово» здесь.",
+            "bat_path": str(bat),
+            "message": "Открыл терминал с Claude. Следуй инструкциям там, потом возвращайся.",
         }
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
