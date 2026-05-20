@@ -24,7 +24,8 @@ block_cipher = None
 
 # Modules with significant lazy-loaded submodules that PyInstaller misses.
 hidden_imports = [
-    *collect_submodules("googleapiclient.discovery_cache"),
+    # discovery_cache submodules are NOT needed — every build() call in our
+    # code uses cache_discovery=False. Saves ~50MB of bundled JSON.
     *collect_submodules("google_auth_oauthlib"),
     *collect_submodules("pdfminer"),
     *collect_submodules("pdfplumber"),
@@ -56,8 +57,11 @@ for _cs in _glob.glob("client_secret_*.apps.googleusercontent.com.json"):
     datas.append((_cs, "."))
     break  # only one expected
 
-# Collect data files from packages that ship data alongside Python code
-for pkg in ("googleapiclient", "google_auth_oauthlib", "pdfplumber",
+# Collect data files from packages that ship data alongside Python code.
+# Skip `googleapiclient` — its discovery_cache/ folder is ~50MB of JSON
+# documents for every Google API, and we use cache_discovery=False
+# everywhere, so we never read those files at runtime.
+for pkg in ("google_auth_oauthlib", "pdfplumber",
             "pdfminer", "uvicorn", "fastapi", "starlette"):
     try:
         datas += collect_data_files(pkg)
@@ -84,6 +88,11 @@ excludes = [
     # Pandas optional plotting / sql
     "pandas.io.formats.style",
     "pandas.plotting._matplotlib",
+    # scipy is pulled in transitively but our code doesn't use it — saves ~70MB
+    "scipy",
+    # We use Playwright with system msedge/chrome channels; bundled Chromium
+    # binaries (chromium-1217/) live in %LOCALAPPDATA%\ms-playwright outside
+    # the bundle. The Python package wrapper still needed.
 ]
 
 a = Analysis(
@@ -101,6 +110,12 @@ a = Analysis(
     noarchive=False,
 )
 
+# NB: do NOT strip discovery_cache/documents/. Even with cache_discovery=False,
+# googleapiclient.discovery imports the cache module and consults the
+# local documents folder before falling back to network — and the network
+# fallback fails in frozen mode (probably SSL cert chain issue). Keeping
+# the ~50MB of JSON adds bulk but is required for Drive/Sheets/etc. to work.
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
@@ -111,7 +126,7 @@ exe = EXE(
     name="workspace_agent",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=True,
     upx=False,        # UPX-packing breaks WebView2 in some setups
     console=False,    # No black cmd window — pywebview opens its own
     disable_windowed_traceback=False,
@@ -126,7 +141,7 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    strip=False,
+    strip=True,
     upx=False,
     upx_exclude=[],
     name="workspace_agent",
