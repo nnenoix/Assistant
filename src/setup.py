@@ -174,20 +174,26 @@ def login_claude() -> dict:
     try:
         import tempfile
         bat = Path(tempfile.gettempdir()) / "workspace_agent_claude_login.bat"
-        # newline='' disables Python's automatic \n→\r\n translation; we
-        # emit \r\n explicitly so we get exactly ONE CRLF per line.
+        # Open Claude in interactive TUI mode — there `/login` is a built-in
+        # slash command that opens the browser for OAuth. Auto-closes the
+        # window when claude exits (no `pause` — user asked for that). The
+        # echo lines below appear briefly before claude clears the screen,
+        # so they're a one-shot hint.
         with bat.open("w", encoding="utf-8", newline="") as f:
             f.write("@echo off\r\n")
             f.write("chcp 65001 > nul\r\n")
-            f.write(f'"{exe}" setup-token\r\n')
+            f.write("title Claude login\r\n")
             f.write("echo.\r\n")
-            f.write("echo ============================================\r\n")
-            f.write("echo  Готово! Можешь закрыть это окно.\r\n")
-            f.write("echo  Workspace Agent сам подхватит вход через 5 сек.\r\n")
-            f.write("echo ============================================\r\n")
-            f.write("pause\r\n")
+            f.write("echo   1. Дождись TUI Claude (1-2 сек)\r\n")
+            f.write("echo   2. Внутри набери: /login\r\n")
+            f.write("echo   3. Пройди браузер-авторизацию\r\n")
+            f.write("echo   4. Затем набери: /quit\r\n")
+            f.write("echo   (это окно закроется само, Workspace Agent поймёт что ты вошёл)\r\n")
+            f.write("echo.\r\n")
+            f.write("timeout /t 2 /nobreak > nul\r\n")
+            f.write(f'"{exe}"\r\n')
         subprocess.Popen(
-            ["cmd.exe", "/c", "start", "", "cmd.exe", "/k", str(bat)],
+            ["cmd.exe", "/c", "start", "", "cmd.exe", "/c", str(bat)],
             creationflags=_CREATE_NEW_CONSOLE,
             close_fds=True,
         )

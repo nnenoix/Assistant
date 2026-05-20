@@ -1533,18 +1533,26 @@ function SetupWizard({ status, onDone }) {
     return () => clearInterval(id);
   }, [startedAt]);
 
-  // While the user is interacting with an external thing (claude TUI in
-  // a separate terminal, OAuth browser tab), poll setup status so the
-  // wizard auto-advances when they finish — no "Готово" click needed.
-  // Cheap path (no auth probe) every 3s; full check via refetch on demand.
+  // Poll setup status so the wizard auto-advances when the user finishes
+  // an external task (claude TUI, OAuth browser). Auth probe costs a few
+  // tokens — do it every 12s, not 5s, and skip if a probe is already in
+  // flight (avoid overlap when --print response is slow).
   useEffect(() => {
     if (!busy && !claudeSpawned) return;
-    const id = setInterval(() => {
-      fetch("/api/setup/status?probe_auth=" + (claudeSpawned ? "true" : "false"))
-        .then(r => r.ok ? r.json() : null)
-        .then(j => { if (j) onDone(j); })
-        .catch(() => {});
-    }, claudeSpawned ? 5000 : 3000);   // 5s when probing real auth (costs tokens)
+    let inFlight = false;
+    const id = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const r = await fetch("/api/setup/status?probe_auth=" + (claudeSpawned ? "true" : "false"));
+        if (r.ok) {
+          const j = await r.json();
+          if (j) onDone(j);
+        }
+      } catch {} finally {
+        inFlight = false;
+      }
+    }, claudeSpawned ? 12000 : 3000);
     return () => clearInterval(id);
   }, [busy, claudeSpawned, onDone]);
 
@@ -1608,14 +1616,15 @@ function SetupWizard({ status, onDone }) {
       key: "install",
     };
   } else if (!haveClaudeAuth) {
-    // Claude installed but not logged in — separate sub-step
     stepNum = "1.5";
     stepTitle = "Войди в Claude";
-    stepSub = "Claude установлен но ещё не залогинен. Открою терминал — в нём войди в свой Pro/Max аккаунт.";
+    stepSub = claudeSpawned
+      ? "Я открыл окно с Claude. Внутри набери /login, пройди auth в браузере, потом набери /quit. Wizard сам подхватит."
+      : "Claude установлен но не залогинен. Открою TUI — внутри набираешь /login, проходишь auth в браузере, потом /quit. Окно закроется само.";
     button = {
       label: busy === "login_claude_spawn" ? "Открываю…"
-           : busy === "login_claude_check" ? "Проверяю Claude…"
-           : claudeSpawned ? "Открыть ещё раз" : "Открыть настройку Claude",
+           : busy === "login_claude_check" ? "Проверяю…"
+           : claudeSpawned ? "Открыть ещё раз" : "Открыть Claude",
       onClick: async () => {
         setBusy("login_claude_spawn"); setErr(null);
         setStartedAt(Date.now()); setElapsed(0);
