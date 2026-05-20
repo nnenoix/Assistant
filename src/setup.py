@@ -150,112 +150,92 @@ def install_claude_cli() -> dict:
     }
 
 
-_CREATE_NEW_CONSOLE = 0x00000010  # Windows-only flag for Popen
-
-
 def login_claude() -> dict:
-    """Open a NEW visible terminal window running `claude setup-token`.
+    """Trigger Claude's browser-based OAuth via `claude auth login`. This
+    is a HEADLESS subcommand — it just opens the user's default browser
+    to claude.com/cai/oauth/authorize and prints the URL as fallback,
+    then exits 0. No TUI, no console window, no user typing.
 
-    Why visible: `claude setup-token` uses Ink (interactive React TUI) which
-    requires a real TTY. A hidden subprocess fails with "Raw mode is not
-    supported on the current process.stdin". So we spawn a fresh cmd.exe
-    window where the user can follow the prompts.
-
-    Implementation note: we write a small .bat file to %TEMP% and run it,
-    instead of building a `cmd /k "..."` argv. Quoting paths inside an
-    argv-via-cmd string gets mangled by Windows (double quotes around an
-    exe path become "C:\\path\\claude.EXE" which cmd treats as a command
-    name, not a path). The .bat sidesteps it entirely.
+    The OAuth completes asynchronously: Anthropic's server captures the
+    callback and the claude CLI background-syncs the resulting token to
+    ~/.claude/. We poll `claude auth status` to know when it's done.
     """
     exe = _find_claude_exe()
     if not exe:
         return {"ok": False, "error": "Claude Code not installed yet — finish step 1 first"}
 
     try:
-        import tempfile
-        bat = Path(tempfile.gettempdir()) / "workspace_agent_claude_login.bat"
-        # Open Claude in interactive TUI mode — there `/login` is a built-in
-        # slash command that opens the browser for OAuth. Auto-closes the
-        # window when claude exits (no `pause` — user asked for that). The
-        # echo lines below appear briefly before claude clears the screen,
-        # so they're a one-shot hint.
-        with bat.open("w", encoding="utf-8", newline="") as f:
-            f.write("@echo off\r\n")
-            f.write("chcp 65001 > nul\r\n")
-            f.write("title Claude login\r\n")
-            f.write("echo.\r\n")
-            f.write("echo   1. Дождись TUI Claude (1-2 сек)\r\n")
-            f.write("echo   2. Внутри набери: /login\r\n")
-            f.write("echo   3. Пройди браузер-авторизацию\r\n")
-            f.write("echo   4. Затем набери: /quit\r\n")
-            f.write("echo   (это окно закроется само, Workspace Agent поймёт что ты вошёл)\r\n")
-            f.write("echo.\r\n")
-            f.write("timeout /t 2 /nobreak > nul\r\n")
-            f.write(f'"{exe}"\r\n')
-        subprocess.Popen(
-            ["cmd.exe", "/c", "start", "", "cmd.exe", "/c", str(bat)],
-            creationflags=_CREATE_NEW_CONSOLE,
-            close_fds=True,
+        proc = subprocess.run(
+            [exe, "auth", "login", "--claudeai"],
+            capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
         )
-        return {
-            "ok": True,
-            "spawned": True,
-            "bat_path": str(bat),
-            "message": "Открыл терминал с Claude. Следуй инструкциям там, потом возвращайся.",
-        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "claude auth login timed out (>15s)"}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+    # The subprocess exits 0 after opening the browser. We extract the
+    # fallback URL so the UI can offer "click here if browser didn't open".
+    fallback_url = None
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("https://"):
+            fallback_url = line
+            break
 
-_NOT_LOGGED_IN_MARKERS = (
-    "Not logged in",
-    "Please run /login",
-    "Authentication required",
-    "No credentials",
-)
+    return {
+        "ok": proc.returncode == 0,
+        "spawned": True,
+        "fallback_url": fallback_url,
+        "stdout_tail": (proc.stdout or "")[-300:],
+        "stderr_tail": (proc.stderr or "")[-300:] if proc.returncode != 0 else None,
+    }
 
 
 def check_claude_auth() -> dict:
-    """Probe whether claude is authenticated. The trap: `claude --print`
-    returns exit code 0 EVEN when not authenticated — it just prints
-    "Not logged in · Please run /login" and exits cleanly. So we must
-    also grep the stdout/stderr for failure markers, not trust exit code
-    alone.
+    """Probe auth state via `claude auth status` — returns a tiny JSON
+    document with {loggedIn, authMethod, apiProvider}. NO model call,
+    NO token cost, finishes in <1 sec.
 
-    Returns {ok, exit_code, reply_preview, stderr_tail, hint?}.
+    Returns {ok, logged_in, auth_method, raw}.
     """
     exe = _find_claude_exe()
     if not exe:
         return {"ok": False, "error": "Claude not installed"}
     try:
         proc = subprocess.run(
-            [exe, "--print", "--max-turns=1", "say ok and nothing else"],
-            capture_output=True, text=True, timeout=30,
+            [exe, "auth", "status"],
+            capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace",
             creationflags=_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "auth check timed out (>30s) — try again"}
+        return {"ok": False, "error": "auth status timed out"}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    not_logged_in = any(m in combined for m in _NOT_LOGGED_IN_MARKERS)
-    ok = (
-        proc.returncode == 0
-        and bool((proc.stdout or "").strip())
-        and not not_logged_in
-    )
-    result = {
-        "ok": ok,
-        "exit_code": proc.returncode,
-        "reply_preview": (proc.stdout or "")[:200].strip(),
-        "stderr_tail": (proc.stderr or "")[-200:],
+    # NB: `claude auth status` exits 1 when NOT logged in but still prints
+    # valid JSON to stdout. Parse the JSON regardless of returncode and
+    # use loggedIn as truth.
+    import json as _json
+    try:
+        data = _json.loads((proc.stdout or "").strip())
+    except Exception:
+        return {
+            "ok": False,
+            "error": (proc.stderr or "").strip()[:200] or "could not parse auth status",
+            "raw_stdout": (proc.stdout or "")[:200],
+        }
+
+    return {
+        "ok": bool(data.get("loggedIn")),
+        "logged_in": bool(data.get("loggedIn")),
+        "auth_method": data.get("authMethod"),
+        "api_provider": data.get("apiProvider"),
+        "raw": data,
     }
-    if not_logged_in:
-        result["error"] = "Claude установлен но НЕ залогинен. Открой PowerShell, набери `claude`, потом `/login`, пройди OAuth."
-        result["needs_login"] = True
-    return result
 
 
 def check_setup_status(probe_auth: bool = True) -> dict:

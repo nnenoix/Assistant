@@ -1510,6 +1510,7 @@ function SetupWizard({ status, onDone }) {
   // the user clicks "Готово" once the terminal walked them through OAuth.
   const [claudeSpawned, setClaudeSpawned] = useState(false);
   const [claudeAuthDone, setClaudeAuthDone] = useState(false);
+  const [claudeFallbackUrl, setClaudeFallbackUrl] = useState(null);
 
   const verifyClaudeAuth = async () => {
     setBusy("login_claude_check"); setErr(null);
@@ -1601,8 +1602,8 @@ function SetupWizard({ status, onDone }) {
     phaseText = `🌐 Открыл вкладку браузера для входа в Google. Выбери аккаунт и подтверди. (${elapsed}с)`;
   } else if (busy === "recheck") {
     phaseText = `Проверяю… (${elapsed}с)`;
-  } else if (claudeSpawned && !claudeAuthDone) {
-    phaseText = "📺 Я открыл окошко терминала с настройкой Claude. Следуй инструкциям там: войди в свой Pro/Max аккаунт. Когда закончишь — нажми «Готово».";
+  } else if (claudeSpawned && !haveClaudeAuth) {
+    phaseText = "🌐 Открыл браузер с Anthropic OAuth. Залогинься через свой Pro/Max аккаунт — wizard поймёт автоматически (проверка каждые 12 сек).";
   }
 
   let stepNum, stepTitle, stepSub, button;
@@ -1617,21 +1618,21 @@ function SetupWizard({ status, onDone }) {
     };
   } else if (!haveClaudeAuth) {
     stepNum = "1.5";
-    stepTitle = "Войди в Claude";
+    stepTitle = "Войти в Claude";
     stepSub = claudeSpawned
-      ? "Я открыл окно с Claude. Внутри набери /login, пройди auth в браузере, потом набери /quit. Wizard сам подхватит."
-      : "Claude установлен но не залогинен. Открою TUI — внутри набираешь /login, проходишь auth в браузере, потом /quit. Окно закроется само.";
+      ? "Открыл браузер с Anthropic. Залогинься через Pro/Max — wizard сам подхватит, ничего больше делать не нужно."
+      : "Открою браузер для входа в свой Anthropic Pro/Max аккаунт. Никаких терминалов и команд.";
     button = {
-      label: busy === "login_claude_spawn" ? "Открываю…"
-           : busy === "login_claude_check" ? "Проверяю…"
-           : claudeSpawned ? "Открыть ещё раз" : "Открыть Claude",
+      label: busy === "login_claude_spawn" ? "Открываю…" : claudeSpawned ? "Открыть ещё раз" : "Войти",
       onClick: async () => {
         setBusy("login_claude_spawn"); setErr(null);
         setStartedAt(Date.now()); setElapsed(0);
         const c = await fetch("/api/setup/login_claude", { method: "POST" }).then(r => r.json());
         setBusy(null); setStartedAt(null);
-        if (!c.ok) { setErr("Не удалось открыть терминал Claude: " + (c.error || "")); return; }
+        if (!c.ok) { setErr("Не удалось открыть OAuth Claude: " + (c.error || "")); return; }
         setClaudeSpawned(true);
+        // Stash fallback URL in case the browser didn't auto-open
+        if (c.fallback_url) setClaudeFallbackUrl(c.fallback_url);
       },
       key: "login_claude_spawn",
     };
@@ -1678,15 +1679,11 @@ function SetupWizard({ status, onDone }) {
           ${busy === button.key && html`<span class="spinner"></span>`}
           ${button.label}
         </button>
-        ${claudeSpawned && !haveClaudeAuth && !busy && html`
-          <button class="big-btn" style="margin-top: 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border-2);" onClick=${async () => {
-            setBusy("login_claude_check"); setErr(null);
-            setStartedAt(Date.now()); setElapsed(0);
-            await refetch();   // server-side check_setup_status probes auth
-            setBusy(null); setStartedAt(null);
-          }}>
-            Я залогинился — проверь
-          </button>
+        ${claudeSpawned && !haveClaudeAuth && claudeFallbackUrl && html`
+          <div class="phase">
+            Если браузер не открылся —
+            <a href=${claudeFallbackUrl} target="_blank" rel="noopener noreferrer" style="color: var(--primary-text);">кликни сюда</a>
+          </div>
         `}
         ${phaseText && html`<div class="phase">${phaseText}</div>`}
         ${err && html`<div class="err">${err}</div>`}
