@@ -4,7 +4,15 @@ Each Google account gets its own token under `.data/tokens/<alias>.json`.
 Aliases are arbitrary strings — use anything memorable (e.g. "main", "work",
 "partner", or the email itself).
 """
+import os
 from pathlib import Path
+
+# Google's OAuth server sometimes returns scopes in a different order than
+# we requested, or adds/removes adjacent scopes (especially with
+# prompt=consent). oauthlib's strict comparison then raises "Scope has
+# changed from ..." and refuses the token. Relaxing this is standard
+# practice for Google OAuth — must be set BEFORE importing the flow.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -84,15 +92,15 @@ def add_account_auto() -> dict:
         ),
         success_message="Auth complete — you can close this tab.",
         # prompt='consent' forces Google to show the FULL scope list every
-        # time, even ones already granted in earlier sessions. Without it
-        # Google hides already-granted scopes (the "У приложения уже есть
-        # некоторые права" banner) which makes the user think we're asking
-        # for fewer permissions than we actually need.
+        # time, even ones already granted. Without it Google hides
+        # already-granted scopes (the "У приложения уже есть некоторые
+        # права" banner) which looks like the app is asking for less than
+        # it needs. NB: do NOT combine with include_granted_scopes='true' —
+        # the two together can make Google return scopes in a different
+        # order than requested, triggering oauthlib's "Scope has changed"
+        # warning. We accept the trade-off: each consent re-grants all 10.
         prompt="consent",
         access_type="offline",
-        # include_granted_scopes keeps any previously-granted scopes on
-        # the same OAuth client so we don't accidentally revoke them.
-        include_granted_scopes="true",
     )
     _sys.stdout.flush()
 
