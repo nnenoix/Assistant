@@ -49,9 +49,31 @@ def _refresh_path_from_registry() -> None:
         pass  # best-effort; user can still restart the app
 
 
+def _find_claude_exe() -> str | None:
+    """Look for claude.exe / claude.cmd / claude (Unix) in PATH first, then
+    well-known install locations the Anthropic installer uses. Covers the
+    case where PATH wasn't refreshed yet after a fresh install or where
+    the user moved/renamed the binary."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    if sys.platform != "win32":
+        return None
+    # Anthropic's native installer drops claude.exe in one of these:
+    candidates = [
+        Path(os.environ.get("USERPROFILE", "")) / ".local" / "bin" / "claude.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "claude" / "claude.exe",
+        Path(os.environ.get("USERPROFILE", "")) / ".claude" / "bin" / "claude.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return None
+
+
 def check_claude_cli() -> dict:
-    """Is `claude` on PATH and runnable? Returns {installed, version}."""
-    exe = shutil.which("claude")
+    """Is Claude Code installed and runnable? Returns {installed, exe, version}."""
+    exe = _find_claude_exe()
     if not exe:
         return {"installed": False, "exe": None}
     try:
@@ -59,8 +81,14 @@ def check_claude_cli() -> dict:
             [exe, "--version"],
             capture_output=True, text=True, timeout=8,
             encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
         )
         if proc.returncode == 0:
+            # Add exe's directory to PATH so subsequent shutil.which() calls
+            # (e.g. from claude-agent-sdk subprocess) find it without restart.
+            exe_dir = str(Path(exe).parent)
+            if exe_dir not in os.environ.get("PATH", "").split(os.pathsep):
+                os.environ["PATH"] = exe_dir + os.pathsep + os.environ.get("PATH", "")
             return {"installed": True, "exe": exe, "version": proc.stdout.strip()}
         return {"installed": False, "exe": exe, "error": proc.stderr.strip()[:200]}
     except subprocess.TimeoutExpired:

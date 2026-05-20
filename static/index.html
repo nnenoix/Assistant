@@ -685,6 +685,12 @@
     padding: 10px 12px;
     text-align: left;
   }
+  .wiz .phase {
+    margin-top: 20px;
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 1.5;
+  }
   .wiz .progress {
     display: flex; justify-content: center; gap: 8px; margin-bottom: 40px;
   }
@@ -1496,44 +1502,84 @@ function Turn({ turn, isLast, isStreaming, awaitingFirstReply }) {
 /* ── first-run wizard — installs Claude Code, logs into Anthropic +
        Google. Renders before <App> when /api/setup/status is incomplete. */
 function SetupWizard({ status, onDone }) {
-  const [busy, setBusy] = useState(null);   // which button is spinning
+  const [busy, setBusy] = useState(null);     // active action key
   const [err, setErr] = useState(null);
+  const [startedAt, setStartedAt] = useState(null);
+  const [elapsed, setElapsed] = useState(0);  // seconds since action started
 
-  // Re-fetch status from server (used after each action)
+  // Tick the elapsed timer every second while busy
+  useEffect(() => {
+    if (!startedAt) return;
+    const id = setInterval(() => {
+      setElapsed(Math.round((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+
+  // While an action is running, also re-poll setup status every 5s — if
+  // claude appears on PATH mid-flight (e.g. installer finished, registry
+  // refreshed), the wizard can advance without waiting for the POST reply.
+  useEffect(() => {
+    if (!busy) return;
+    const id = setInterval(() => {
+      fetch("/api/setup/status")
+        .then(r => r.ok ? r.json() : null)
+        .then(j => { if (j && j.complete) onDone(j); })
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(id);
+  }, [busy, onDone]);
+
   const refetch = useCallback(async () => {
     const r = await fetch("/api/setup/status").then(r => r.json());
     onDone(r);
     return r;
   }, [onDone]);
 
-  const run = async (key, url) => {
+  const runAction = async (key, url) => {
     setBusy(key); setErr(null);
+    setStartedAt(Date.now()); setElapsed(0);
     try {
       const r = await fetch(url, { method: "POST" }).then(r => r.json());
-      if (!r.ok) {
-        setErr(r.error || "Что-то пошло не так. Попробуй ещё раз.");
-      }
+      if (!r.ok) setErr(r.error || "Что-то пошло не так. Попробуй ещё раз.");
     } catch (e) {
       setErr(String(e));
     } finally {
       setBusy(null);
+      setStartedAt(null);
       await refetch();
     }
   };
 
-  // Decide which step to show
   const haveClaudeCli   = status?.claude_cli?.installed;
   const haveOauthClient = status?.oauth_client?.present;
   const haveMainToken   = status?.main_token?.present;
+
+  // Per-phase status text shown UNDER the button while busy. Anchors
+  // the user — "what's actually happening right now".
+  let phaseText = null;
+  if (busy === "install") {
+    phaseText = elapsed < 15
+      ? `⬇ Скачиваю Claude Code с anthropic.com… (${elapsed}с)`
+      : elapsed < 60
+        ? `⚙ Распаковываю и устанавливаю… (${elapsed}с / обычно 30-90с)`
+        : `⏳ Всё ещё идёт (${elapsed}с). Если больше 3 минут — проверь интернет, потом перезапусти.`;
+  } else if (busy === "login_claude") {
+    phaseText = `🌐 Открыл вкладку браузера для входа в Claude. Кликни «Authorize». (${elapsed}с)`;
+  } else if (busy === "login_google") {
+    phaseText = `🌐 Открыл вкладку браузера для входа в Google. Выбери аккаунт и подтверди. (${elapsed}с)`;
+  } else if (busy === "recheck") {
+    phaseText = `Проверяю… (${elapsed}с)`;
+  }
 
   let stepNum, stepTitle, stepSub, button;
   if (!haveClaudeCli) {
     stepNum = 1;
     stepTitle = "Установка Claude Code";
-    stepSub = "Скачаю и установлю официальный CLI от Anthropic (~30–60 сек). Это та программа, которая на самом деле общается с моделью.";
+    stepSub = "Это бесплатная утилита от Anthropic — программа, которая на самом деле общается с моделью. Если уже есть на компьютере, кнопка просто проверит и пойдёт дальше.";
     button = {
       label: busy === "install" ? "Устанавливаю…" : "Установить",
-      onClick: () => run("install", "/api/setup/install_claude"),
+      onClick: () => runAction("install", "/api/setup/install_claude"),
       key: "install",
     };
   } else if (!haveOauthClient) {
@@ -1542,27 +1588,30 @@ function SetupWizard({ status, onDone }) {
     stepSub = "В папке с программой нет файла client_secret_*.json. Положи его рядом с workspace_agent.exe и нажми «Проверить».";
     button = {
       label: busy === "recheck" ? "Проверяю…" : "Проверить",
-      onClick: () => run("recheck", "/api/setup/status"),  // GET would also work
+      onClick: () => runAction("recheck", "/api/setup/status"),
       key: "recheck",
     };
   } else if (!haveMainToken) {
     stepNum = 2;
     stepTitle = "Войди в Claude и Google";
-    stepSub = "Сначала выйдет окно браузера для Anthropic (Pro/Max подписка). Потом — для Google (твой Drive и Sheets).";
+    stepSub = "Откроется браузер: сначала Anthropic (твоя Pro/Max подписка), потом Google (твой Drive/Sheets). После каждого экрана нажми «Authorize / Continue».";
     button = {
-      label: busy === "login_claude"
-        ? "Жду Claude…"
-        : busy === "login_google"
-          ? "Жду Google…"
-          : "Войти",
+      label: busy === "login_claude" ? "Жду Claude…"
+           : busy === "login_google" ? "Жду Google…"
+           : "Войти",
       onClick: async () => {
         setBusy("login_claude"); setErr(null);
+        setStartedAt(Date.now()); setElapsed(0);
         const c = await fetch("/api/setup/login_claude", { method: "POST" }).then(r => r.json());
-        if (!c.ok) { setErr("Claude login: " + (c.error || "ошибка")); setBusy(null); return; }
+        if (!c.ok) {
+          setErr("Claude login: " + (c.error || "ошибка"));
+          setBusy(null); setStartedAt(null); return;
+        }
         setBusy("login_google");
+        setStartedAt(Date.now()); setElapsed(0);
         const g = await fetch("/api/setup/start_oauth", { method: "POST" }).then(r => r.json());
-        if (!g.ok) { setErr("Google login: " + (g.error || "ошибка")); }
-        setBusy(null);
+        if (!g.ok) setErr("Google login: " + (g.error || "ошибка"));
+        setBusy(null); setStartedAt(null);
         await refetch();
       },
       key: "login_claude",
@@ -1584,6 +1633,7 @@ function SetupWizard({ status, onDone }) {
           ${busy === button.key && html`<span class="spinner"></span>`}
           ${button.label}
         </button>
+        ${phaseText && html`<div class="phase">${phaseText}</div>`}
         ${err && html`<div class="err">${err}</div>`}
       </div>
     </div>
