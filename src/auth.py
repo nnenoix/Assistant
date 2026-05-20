@@ -83,6 +83,16 @@ def add_account_auto() -> dict:
             "\n>>> If a browser window did NOT open, copy this URL manually:\n{url}\n"
         ),
         success_message="Auth complete — you can close this tab.",
+        # prompt='consent' forces Google to show the FULL scope list every
+        # time, even ones already granted in earlier sessions. Without it
+        # Google hides already-granted scopes (the "У приложения уже есть
+        # некоторые права" banner) which makes the user think we're asking
+        # for fewer permissions than we actually need.
+        prompt="consent",
+        access_type="offline",
+        # include_granted_scopes keeps any previously-granted scopes on
+        # the same OAuth client so we don't accidentally revoke them.
+        include_granted_scopes="true",
     )
     _sys.stdout.flush()
 
@@ -103,6 +113,7 @@ def add_account_auto() -> dict:
         "email": email,
         "name": name,
         "saved_to": str(path),
+        "scopes_count": len(creds.scopes or []),
     }
 
 
