@@ -1533,19 +1533,20 @@ function SetupWizard({ status, onDone }) {
     return () => clearInterval(id);
   }, [startedAt]);
 
-  // While an action is running, also re-poll setup status every 5s — if
-  // claude appears on PATH mid-flight (e.g. installer finished, registry
-  // refreshed), the wizard can advance without waiting for the POST reply.
+  // While the user is interacting with an external thing (claude TUI in
+  // a separate terminal, OAuth browser tab), poll setup status so the
+  // wizard auto-advances when they finish — no "Готово" click needed.
+  // Cheap path (no auth probe) every 3s; full check via refetch on demand.
   useEffect(() => {
-    if (!busy) return;
+    if (!busy && !claudeSpawned) return;
     const id = setInterval(() => {
-      fetch("/api/setup/status")
+      fetch("/api/setup/status?probe_auth=" + (claudeSpawned ? "true" : "false"))
         .then(r => r.ok ? r.json() : null)
-        .then(j => { if (j && j.complete) onDone(j); })
+        .then(j => { if (j) onDone(j); })
         .catch(() => {});
-    }, 5000);
+    }, claudeSpawned ? 5000 : 3000);   // 5s when probing real auth (costs tokens)
     return () => clearInterval(id);
-  }, [busy, onDone]);
+  }, [busy, claudeSpawned, onDone]);
 
   const refetch = useCallback(async () => {
     const r = await fetch("/api/setup/status").then(r => r.json());
@@ -1569,8 +1570,11 @@ function SetupWizard({ status, onDone }) {
   };
 
   const haveClaudeCli   = status?.claude_cli?.installed;
+  const haveClaudeAuth  = status?.claude_auth?.ok;
   const haveOauthClient = status?.oauth_client?.present;
   const haveMainToken   = status?.main_token?.present;
+  // We need claude installed AND logged in before considering step 1 done
+  const step1Done = haveClaudeCli && haveClaudeAuth;
 
   // Per-phase status text shown UNDER the button while busy. Anchors
   // the user — "what's actually happening right now".
@@ -1603,6 +1607,25 @@ function SetupWizard({ status, onDone }) {
       onClick: () => runAction("install", "/api/setup/install_claude"),
       key: "install",
     };
+  } else if (!haveClaudeAuth) {
+    // Claude installed but not logged in — separate sub-step
+    stepNum = "1.5";
+    stepTitle = "Войди в Claude";
+    stepSub = "Claude установлен но ещё не залогинен. Открою терминал — в нём войди в свой Pro/Max аккаунт.";
+    button = {
+      label: busy === "login_claude_spawn" ? "Открываю…"
+           : busy === "login_claude_check" ? "Проверяю Claude…"
+           : claudeSpawned ? "Открыть ещё раз" : "Открыть настройку Claude",
+      onClick: async () => {
+        setBusy("login_claude_spawn"); setErr(null);
+        setStartedAt(Date.now()); setElapsed(0);
+        const c = await fetch("/api/setup/login_claude", { method: "POST" }).then(r => r.json());
+        setBusy(null); setStartedAt(null);
+        if (!c.ok) { setErr("Не удалось открыть терминал Claude: " + (c.error || "")); return; }
+        setClaudeSpawned(true);
+      },
+      key: "login_claude_spawn",
+    };
   } else if (!haveOauthClient) {
     stepNum = "!";
     stepTitle = "Не хватает OAuth-клиента";
@@ -1614,30 +1637,11 @@ function SetupWizard({ status, onDone }) {
     };
   } else if (!haveMainToken) {
     stepNum = 2;
-    stepTitle = "Войди в Claude и Google";
-    stepSub = claudeAuthDone
-      ? "Claude настроен. Теперь Google — откроется окно браузера, выбери аккаунт и подтверди."
-      : "Сначала Claude — открою отдельное окошко с настройкой Pro/Max. Потом Google.";
-    const labelFor = (b) => {
-      if (b === "login_claude_spawn") return "Открываю Claude…";
-      if (b === "login_claude_check") return "Проверяю Claude…";
-      if (b === "login_google") return "Жду Google…";
-      return claudeAuthDone ? "Войти в Google" : "Открыть настройку Claude";
-    };
+    stepTitle = "Войди в Google";
+    stepSub = "Откроется браузер — выбери аккаунт (Drive/Sheets/Gmail) и подтверди.";
     button = {
-      label: labelFor(busy),
+      label: busy === "login_google" ? "Жду Google…" : "Войти в Google",
       onClick: async () => {
-        if (!claudeAuthDone) {
-          // First click in this step: spawn the Claude setup-token terminal
-          setBusy("login_claude_spawn"); setErr(null);
-          setStartedAt(Date.now()); setElapsed(0);
-          const c = await fetch("/api/setup/login_claude", { method: "POST" }).then(r => r.json());
-          setBusy(null); setStartedAt(null);
-          if (!c.ok) { setErr("Не удалось открыть терминал Claude: " + (c.error || "")); return; }
-          setClaudeSpawned(true);  // shows "Готово" button
-          return;
-        }
-        // claudeAuthDone — proceed to Google
         setBusy("login_google"); setErr(null);
         setStartedAt(Date.now()); setElapsed(0);
         const g = await fetch("/api/setup/start_oauth", { method: "POST" }).then(r => r.json());
@@ -1645,7 +1649,7 @@ function SetupWizard({ status, onDone }) {
         if (!g.ok) setErr("Google login: " + (g.error || "ошибка"));
         await refetch();
       },
-      key: claudeAuthDone ? "login_google" : "login_claude_spawn",
+      key: "login_google",
     };
   }
 
@@ -1655,7 +1659,8 @@ function SetupWizard({ status, onDone }) {
         <h1>Workspace Agent</h1>
         <div class="progress">
           <div class=${"dot " + (haveClaudeCli ? "done" : "active")}></div>
-          <div class=${"dot " + (haveMainToken ? "done" : haveClaudeCli ? "active" : "")}></div>
+          <div class=${"dot " + (haveClaudeAuth ? "done" : haveClaudeCli ? "active" : "")}></div>
+          <div class=${"dot " + (haveMainToken ? "done" : step1Done ? "active" : "")}></div>
         </div>
         <div class="step-num">Шаг ${stepNum}</div>
         <div class="step-title">${stepTitle}</div>
@@ -1664,9 +1669,14 @@ function SetupWizard({ status, onDone }) {
           ${busy === button.key && html`<span class="spinner"></span>`}
           ${button.label}
         </button>
-        ${claudeSpawned && !claudeAuthDone && !busy && html`
-          <button class="big-btn" style="margin-top: 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border-2);" onClick=${verifyClaudeAuth}>
-            Готово
+        ${claudeSpawned && !haveClaudeAuth && !busy && html`
+          <button class="big-btn" style="margin-top: 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border-2);" onClick=${async () => {
+            setBusy("login_claude_check"); setErr(null);
+            setStartedAt(Date.now()); setElapsed(0);
+            await refetch();   // server-side check_setup_status probes auth
+            setBusy(null); setStartedAt(null);
+          }}>
+            Я залогинился — проверь
           </button>
         `}
         ${phaseText && html`<div class="phase">${phaseText}</div>`}

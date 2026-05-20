@@ -185,12 +185,22 @@ def login_claude() -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def check_claude_auth() -> dict:
-    """Probe whether claude is authenticated by running a tiny --print call.
-    `claude --print` makes a real API request, so success = auth works.
-    Costs a few tokens. Takes 3-15 sec.
+_NOT_LOGGED_IN_MARKERS = (
+    "Not logged in",
+    "Please run /login",
+    "Authentication required",
+    "No credentials",
+)
 
-    Returns {ok, exit_code, stderr_tail}. ok=True iff Claude responded.
+
+def check_claude_auth() -> dict:
+    """Probe whether claude is authenticated. The trap: `claude --print`
+    returns exit code 0 EVEN when not authenticated — it just prints
+    "Not logged in · Please run /login" and exits cleanly. So we must
+    also grep the stdout/stderr for failure markers, not trust exit code
+    alone.
+
+    Returns {ok, exit_code, reply_preview, stderr_tail, hint?}.
     """
     exe = _find_claude_exe()
     if not exe:
@@ -202,32 +212,59 @@ def check_claude_auth() -> dict:
             encoding="utf-8", errors="replace",
             creationflags=_NO_WINDOW,
         )
-        ok = proc.returncode == 0 and bool((proc.stdout or "").strip())
-        return {
-            "ok": ok,
-            "exit_code": proc.returncode,
-            "reply_preview": (proc.stdout or "")[:120].strip(),
-            "stderr_tail": (proc.stderr or "")[-200:],
-        }
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "auth check timed out (>30s) — try again"}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    not_logged_in = any(m in combined for m in _NOT_LOGGED_IN_MARKERS)
+    ok = (
+        proc.returncode == 0
+        and bool((proc.stdout or "").strip())
+        and not not_logged_in
+    )
+    result = {
+        "ok": ok,
+        "exit_code": proc.returncode,
+        "reply_preview": (proc.stdout or "")[:200].strip(),
+        "stderr_tail": (proc.stderr or "")[-200:],
+    }
+    if not_logged_in:
+        result["error"] = "Claude установлен но НЕ залогинен. Открой PowerShell, набери `claude`, потом `/login`, пройди OAuth."
+        result["needs_login"] = True
+    return result
 
-def check_setup_status() -> dict:
+
+def check_setup_status(probe_auth: bool = True) -> dict:
     """One-shot: returns the full first-run state plus a `complete` flag.
 
     `complete = True` means the chat is ready to use. Wizard renders if
     `complete = False` and falls back into main UI as soon as missing
     pieces show up.
+
+    `probe_auth` runs check_claude_auth (which costs ~few tokens). UI polls
+    this endpoint regularly; the cheap path (probe_auth=False) only checks
+    installation, used when nothing's likely to have changed mid-flight.
     """
     claude = check_claude_cli()
     oauth_client = check_oauth_client()
     main_token = check_main_token()
+
+    claude_authed = None
+    if probe_auth and claude.get("installed"):
+        claude_authed = check_claude_auth()
+
+    complete = bool(
+        claude.get("installed")
+        and oauth_client.get("present")
+        and main_token.get("present")
+        and (claude_authed is None or claude_authed.get("ok"))
+    )
     return {
         "claude_cli": claude,
+        "claude_auth": claude_authed,
         "oauth_client": oauth_client,
         "main_token": main_token,
-        "complete": bool(claude.get("installed") and oauth_client.get("present") and main_token.get("present")),
+        "complete": complete,
     }

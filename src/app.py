@@ -191,12 +191,13 @@ async def chat(req: ChatRequest):
 
 
 @app.get("/api/setup/status")
-async def setup_status_api():
+async def setup_status_api(probe_auth: bool = True):
     """One-stop check for the welcome wizard. Returns whether Claude CLI is
-    on PATH, OAuth client bundled, and main token granted. `complete=True`
-    when chat is ready to use."""
+    on PATH AND authenticated, OAuth client bundled, and main token granted.
+    `complete=True` only when ALL four are good (auth costs ~few tokens —
+    pass probe_auth=False for cheap polling that only checks installation)."""
     from src import setup
-    return setup.check_setup_status()
+    return await asyncio.to_thread(setup.check_setup_status, probe_auth)
 
 
 @app.post("/api/setup/install_claude")
