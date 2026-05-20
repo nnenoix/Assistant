@@ -66,6 +66,46 @@ def get_credentials(account: str = "main") -> Credentials:
     return creds
 
 
+def add_account_auto() -> dict:
+    """Run the OAuth flow without picking an alias in advance. After the
+    user finishes consent, look up the bound Google identity and save the
+    token under the local-part of the email (e.g. elenatitarenko247@gmail.com
+    → elenatitarenko247.json). Returns {alias, email, name, saved_to}.
+
+    If a token under that alias already exists, it's overwritten (re-OAuth
+    of the same account). User never types a name.
+    """
+    import sys as _sys
+    flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
+    creds = flow.run_local_server(
+        port=0, open_browser=True,
+        authorization_prompt_message=(
+            "\n>>> If a browser window did NOT open, copy this URL manually:\n{url}\n"
+        ),
+        success_message="Auth complete — you can close this tab.",
+    )
+    _sys.stdout.flush()
+
+    # Find the bound Google identity
+    from googleapiclient.discovery import build as _build
+    svc = _build("drive", "v3", credentials=creds, cache_discovery=False)
+    user = svc.about().get(fields="user(emailAddress,displayName)").execute()["user"]
+    email = user["emailAddress"]
+    name = user.get("displayName")
+
+    # Sanitize email-local-part into a safe filename
+    alias_raw = email.split("@", 1)[0]
+    alias = "".join(c if c.isalnum() or c in "-_." else "_" for c in alias_raw).strip("._-") or "account"
+    path = _token_path(alias)
+    path.write_text(creds.to_json())
+    return {
+        "alias": alias,
+        "email": email,
+        "name": name,
+        "saved_to": str(path),
+    }
+
+
 def add_account(account: str) -> dict:
     """Run the OAuth flow and save the token under `account`. Opens a browser on this machine.
 

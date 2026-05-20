@@ -394,6 +394,17 @@ async def list_accounts_detailed_api():
     return await asyncio.to_thread(auth.list_accounts_with_identity)
 
 
+@app.post("/api/accounts/add_auto")
+async def add_account_auto_api():
+    """Open Google OAuth, save the token under the email-derived alias.
+    No user typing. Returns {ok, alias, email, name?, error?}."""
+    try:
+        result = await asyncio.to_thread(auth.add_account_auto)
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+
+
 @app.post("/api/accounts")
 async def add_account_api(req: AddAccountRequest):
     alias = req.alias.strip()

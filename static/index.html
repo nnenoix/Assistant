@@ -1203,8 +1203,7 @@ function ApprovalModal({ req, onResolve }) {
         moved here so the user stays inside the pywebview window) ────── */
 function AccountsModal({ open, onClose }) {
   const [data, setData] = useState(null);        // { alias: { email, name, scopes, error? } }
-  const [newAlias, setNewAlias] = useState("");
-  const [busy, setBusy] = useState(null);        // alias being mutated
+  const [busy, setBusy] = useState(null);        // alias being mutated, or "__add__"
   const [error, setError] = useState(null);
 
   const fetchAccounts = useCallback(async () => {
@@ -1222,20 +1221,13 @@ function AccountsModal({ open, onClose }) {
   if (!open) return null;
 
   const addAccount = async () => {
-    const alias = newAlias.trim();
-    if (!alias) return;
-    if (/[/\\:*?"<>|]/.test(alias)) {
-      setError("Имя не должно содержать /\\:*?\"<>|"); return;
-    }
     setBusy("__add__"); setError(null);
     try {
-      const r = await fetch("/api/accounts", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ alias }),
-      }).then(r => r.json());
+      const r = await fetch("/api/accounts/add_auto", { method: "POST" }).then(r => r.json());
       if (!r.ok) setError(r.error || "Не получилось добавить");
-      setNewAlias("");
+      else if (r.email) {
+        // Pretty confirmation — alias was auto-derived from email
+      }
       await fetchAccounts();
     } catch (e) {
       setError(String(e));
@@ -1295,24 +1287,12 @@ function AccountsModal({ open, onClose }) {
             </div>
           `)}
 
-          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
-            <div style="font-weight: 600; margin-bottom: 6px;">Привязать новый Google-аккаунт</div>
-            <div style="color: var(--text-2); font-size: 12.5px; margin-bottom: 12px;">
-              Введи короткое имя (work, mom, varychev), потом откроется браузер для входа в Google.
-            </div>
-            <div style="display: flex; gap: 8px;">
-              <input
-                type="text"
-                placeholder="например, work"
-                value=${newAlias}
-                onInput=${(e) => setNewAlias(e.target.value)}
-                onKeyDown=${(e) => { if (e.key === "Enter") addAccount(); }}
-                disabled=${busy === "__add__"}
-                style="flex: 1; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 14px;"
-              />
-              <button class="big-btn" style="min-width: 130px;" disabled=${busy === "__add__" || !newAlias.trim()} onClick=${addAccount}>
-                ${busy === "__add__" ? html`<span class="spinner"></span> Жду Google…` : "Добавить"}
-              </button>
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); text-align: center;">
+            <button class="big-btn" style="min-width: 240px;" disabled=${busy === "__add__"} onClick=${addAccount}>
+              ${busy === "__add__" ? html`<span class="spinner"></span> Жду Google…` : "+ Привязать Google аккаунт"}
+            </button>
+            <div style="color: var(--text-3); font-size: 11.5px; margin-top: 8px;">
+              Откроется браузер. Выбери аккаунт, подтверди — имя присвою сам по email.
             </div>
           </div>
 
