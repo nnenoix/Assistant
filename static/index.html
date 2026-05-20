@@ -1506,6 +1506,23 @@ function SetupWizard({ status, onDone }) {
   const [err, setErr] = useState(null);
   const [startedAt, setStartedAt] = useState(null);
   const [elapsed, setElapsed] = useState(0);  // seconds since action started
+  // Claude auth is a 2-stage flow: spawn the setup-token terminal, then
+  // the user clicks "Готово" once the terminal walked them through OAuth.
+  const [claudeSpawned, setClaudeSpawned] = useState(false);
+  const [claudeAuthDone, setClaudeAuthDone] = useState(false);
+
+  const verifyClaudeAuth = async () => {
+    setBusy("login_claude_check"); setErr(null);
+    setStartedAt(Date.now()); setElapsed(0);
+    const r = await fetch("/api/setup/check_claude_auth", { method: "POST" }).then(r => r.json());
+    setBusy(null); setStartedAt(null);
+    if (r.ok) {
+      setClaudeAuthDone(true);
+    } else {
+      setErr("Claude ещё не подключен. " + (r.error || r.stderr_tail || "") + " Открой окно с настройкой ещё раз и доведи до конца.");
+      setClaudeSpawned(false);
+    }
+  };
 
   // Tick the elapsed timer every second while busy
   useEffect(() => {
@@ -1564,12 +1581,16 @@ function SetupWizard({ status, onDone }) {
       : elapsed < 60
         ? `⚙ Распаковываю и устанавливаю… (${elapsed}с / обычно 30-90с)`
         : `⏳ Всё ещё идёт (${elapsed}с). Если больше 3 минут — проверь интернет, потом перезапусти.`;
-  } else if (busy === "login_claude") {
-    phaseText = `🌐 Открыл вкладку браузера для входа в Claude. Кликни «Authorize». (${elapsed}с)`;
+  } else if (busy === "login_claude_spawn") {
+    phaseText = `Открываю терминал…`;
+  } else if (busy === "login_claude_check") {
+    phaseText = `🔍 Проверяю что Claude отвечает (${elapsed}с)…`;
   } else if (busy === "login_google") {
     phaseText = `🌐 Открыл вкладку браузера для входа в Google. Выбери аккаунт и подтверди. (${elapsed}с)`;
   } else if (busy === "recheck") {
     phaseText = `Проверяю… (${elapsed}с)`;
+  } else if (claudeSpawned && !claudeAuthDone) {
+    phaseText = "📺 Я открыл окошко терминала с настройкой Claude. Следуй инструкциям там: войди в свой Pro/Max аккаунт. Когда закончишь — нажми «Готово».";
   }
 
   let stepNum, stepTitle, stepSub, button;
@@ -1594,27 +1615,37 @@ function SetupWizard({ status, onDone }) {
   } else if (!haveMainToken) {
     stepNum = 2;
     stepTitle = "Войди в Claude и Google";
-    stepSub = "Откроется браузер: сначала Anthropic (твоя Pro/Max подписка), потом Google (твой Drive/Sheets). После каждого экрана нажми «Authorize / Continue».";
+    stepSub = claudeAuthDone
+      ? "Claude настроен. Теперь Google — откроется окно браузера, выбери аккаунт и подтверди."
+      : "Сначала Claude — открою отдельное окошко с настройкой Pro/Max. Потом Google.";
+    const labelFor = (b) => {
+      if (b === "login_claude_spawn") return "Открываю Claude…";
+      if (b === "login_claude_check") return "Проверяю Claude…";
+      if (b === "login_google") return "Жду Google…";
+      return claudeAuthDone ? "Войти в Google" : "Открыть настройку Claude";
+    };
     button = {
-      label: busy === "login_claude" ? "Жду Claude…"
-           : busy === "login_google" ? "Жду Google…"
-           : "Войти",
+      label: labelFor(busy),
       onClick: async () => {
-        setBusy("login_claude"); setErr(null);
-        setStartedAt(Date.now()); setElapsed(0);
-        const c = await fetch("/api/setup/login_claude", { method: "POST" }).then(r => r.json());
-        if (!c.ok) {
-          setErr("Claude login: " + (c.error || "ошибка"));
-          setBusy(null); setStartedAt(null); return;
+        if (!claudeAuthDone) {
+          // First click in this step: spawn the Claude setup-token terminal
+          setBusy("login_claude_spawn"); setErr(null);
+          setStartedAt(Date.now()); setElapsed(0);
+          const c = await fetch("/api/setup/login_claude", { method: "POST" }).then(r => r.json());
+          setBusy(null); setStartedAt(null);
+          if (!c.ok) { setErr("Не удалось открыть терминал Claude: " + (c.error || "")); return; }
+          setClaudeSpawned(true);  // shows "Готово" button
+          return;
         }
-        setBusy("login_google");
+        // claudeAuthDone — proceed to Google
+        setBusy("login_google"); setErr(null);
         setStartedAt(Date.now()); setElapsed(0);
         const g = await fetch("/api/setup/start_oauth", { method: "POST" }).then(r => r.json());
-        if (!g.ok) setErr("Google login: " + (g.error || "ошибка"));
         setBusy(null); setStartedAt(null);
+        if (!g.ok) setErr("Google login: " + (g.error || "ошибка"));
         await refetch();
       },
-      key: "login_claude",
+      key: claudeAuthDone ? "login_google" : "login_claude_spawn",
     };
   }
 
@@ -1633,6 +1664,11 @@ function SetupWizard({ status, onDone }) {
           ${busy === button.key && html`<span class="spinner"></span>`}
           ${button.label}
         </button>
+        ${claudeSpawned && !claudeAuthDone && !busy && html`
+          <button class="big-btn" style="margin-top: 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border-2);" onClick=${verifyClaudeAuth}>
+            Готово
+          </button>
+        `}
         ${phaseText && html`<div class="phase">${phaseText}</div>`}
         ${err && html`<div class="err">${err}</div>`}
       </div>

@@ -211,11 +211,20 @@ async def setup_install_claude_api():
 
 @app.post("/api/setup/login_claude")
 async def setup_login_claude_api():
-    """Run `claude login` — opens a browser tab for Anthropic OAuth, waits
-    for the user to consent, captures the callback. No console window.
+    """Spawn a visible terminal with `claude setup-token`. Returns
+    immediately; client polls /api/setup/check_claude_auth to know when
+    the user has finished.
     """
     from src import setup
     return await asyncio.to_thread(setup.login_claude)
+
+
+@app.post("/api/setup/check_claude_auth")
+async def setup_check_claude_auth_api():
+    """Probe whether `claude` is authenticated by making a tiny test
+    request to the model. Returns ok=True iff Claude responds."""
+    from src import setup
+    return await asyncio.to_thread(setup.check_claude_auth)
 
 
 @app.post("/api/setup/start_oauth")

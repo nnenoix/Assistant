@@ -150,36 +150,69 @@ def install_claude_cli() -> dict:
     }
 
 
-def login_claude() -> dict:
-    """Run `claude login` as a hidden subprocess. The CLI opens the user's
-    default browser to anthropic.com OAuth; the user clicks Approve; the
-    CLI captures the callback and exits. We only watch for the exit code.
+_CREATE_NEW_CONSOLE = 0x00000010  # Windows-only flag for Popen
 
-    Blocks for the duration of the user's OAuth flow (up to 5 min).
-    Returns {ok, output?, error?}.
+
+def login_claude() -> dict:
+    """Open a NEW visible terminal window running `claude setup-token`.
+
+    Why visible: `claude setup-token` uses Ink (interactive React TUI) which
+    requires a real TTY. A hidden subprocess fails with "Raw mode is not
+    supported on the current process.stdin". So we spawn a fresh cmd.exe
+    window where the user can follow the prompts.
+
+    Returns immediately (spawned process runs independently). UI shows the
+    user a "Done" button — clicking it calls check_claude_auth() to verify.
     """
-    exe = shutil.which("claude")
+    exe = _find_claude_exe()
     if not exe:
-        return {"ok": False, "error": "claude CLI not installed (run install_claude_cli first)"}
+        return {"ok": False, "error": "Claude Code not installed yet — finish step 1 first"}
 
     try:
-        proc = subprocess.run(
-            [exe, "login"],
-            capture_output=True, text=True, timeout=300,
-            encoding="utf-8", errors="replace",
-            creationflags=_NO_WINDOW,
+        # Wrap in cmd /k so the window stays open after setup-token exits
+        # (lets the user see "Done" before closing). Detached from us.
+        subprocess.Popen(
+            ["cmd.exe", "/k", f'"{exe}" setup-token & echo. & echo Готово! Можешь закрыть это окно. & pause'],
+            creationflags=_CREATE_NEW_CONSOLE,
+            close_fds=True,
         )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "login timed out after 5 minutes — try again"}
+        return {
+            "ok": True,
+            "spawned": True,
+            "message": "Открыл терминал с Claude. Следуй инструкциям там, потом нажми «Готово» здесь.",
+        }
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    return {
-        "ok": proc.returncode == 0,
-        "exit_code": proc.returncode,
-        "output": (proc.stdout or "")[-600:],
-        "error": (proc.stderr or "")[-400:] if proc.returncode != 0 else None,
-    }
+
+def check_claude_auth() -> dict:
+    """Probe whether claude is authenticated by running a tiny --print call.
+    `claude --print` makes a real API request, so success = auth works.
+    Costs a few tokens. Takes 3-15 sec.
+
+    Returns {ok, exit_code, stderr_tail}. ok=True iff Claude responded.
+    """
+    exe = _find_claude_exe()
+    if not exe:
+        return {"ok": False, "error": "Claude not installed"}
+    try:
+        proc = subprocess.run(
+            [exe, "--print", "--max-turns=1", "say ok and nothing else"],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
+        )
+        ok = proc.returncode == 0 and bool((proc.stdout or "").strip())
+        return {
+            "ok": ok,
+            "exit_code": proc.returncode,
+            "reply_preview": (proc.stdout or "")[:120].strip(),
+            "stderr_tail": (proc.stderr or "")[-200:],
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "auth check timed out (>30s) — try again"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def check_setup_status() -> dict:
