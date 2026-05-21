@@ -116,3 +116,40 @@ def test_remove_account_existing(fresh_tokens_dir):
 def test_remove_account_missing(fresh_tokens_dir):
     result = auth.remove_account("nope")
     assert result["removed"] is False
+
+
+# ---------- bug_012 lockdown: rename_account handles case-only on Win/macOS ----------
+
+def test_rename_account_basic(fresh_tokens_dir):
+    _write_token(fresh_tokens_dir / "old.json")
+    result = auth.rename_account("old", "new")
+    assert result["ok"] is True
+    assert (fresh_tokens_dir / "new.json").exists()
+    assert not (fresh_tokens_dir / "old.json").exists()
+
+
+def test_rename_account_case_only(fresh_tokens_dir):
+    """REGRESSION: ``main`` → ``Main`` on case-insensitive FS (Windows,
+    default macOS) previously failed with 'имя уже занято' because
+    ``dst.exists()`` saw the same file. Must succeed via two-step rename."""
+    src = fresh_tokens_dir / "main.json"
+    _write_token(src)
+    result = auth.rename_account("main", "Main")
+    assert result["ok"] is True, result
+    # On case-insensitive FS both names resolve to the same inode; the test
+    # passes on Linux too because rename to a different string is supported.
+    assert (fresh_tokens_dir / "Main.json").exists()
+
+
+def test_rename_account_clobber_blocked(fresh_tokens_dir):
+    _write_token(fresh_tokens_dir / "a.json")
+    _write_token(fresh_tokens_dir / "b.json")
+    result = auth.rename_account("a", "b")
+    assert result["ok"] is False
+    assert "занято" in result["error"]
+
+
+def test_rename_account_missing_source(fresh_tokens_dir):
+    result = auth.rename_account("nope", "new")
+    assert result["ok"] is False
+    assert "нет" in result["error"]
