@@ -50,7 +50,9 @@ def _call(path: str, token: str, **kwargs) -> dict:
     rl: dict = {}
     for k, v in (hdr or {}).items():
         lk = k.lower()
-        if lk.startswith("x-rate-limit") or lk == "x-lognex-retry-timeinterval":
+        # МойСклад returns BOTH `X-RateLimit-*` (per their public docs) and the
+        # vendor-specific `X-Lognex-Retry-TimeInterval`. Accept both.
+        if lk.startswith("x-ratelimit-") or lk.startswith("x-rate-limit-") or lk == "x-lognex-retry-timeinterval":
             try:
                 rl[lk] = int(v)
             except (ValueError, TypeError):
