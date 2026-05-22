@@ -16,17 +16,39 @@ import json
 from functools import lru_cache
 from typing import Any
 
+import google_auth_httplib2
+import httplib2
 from googleapiclient.discovery import build
 
-from src.auth import get_credentials
+from src.auth import RetryingHttpRequest, get_credentials
+from src.tools._errors import _classify_exception
 
 
 DEFAULT_ACCOUNT = "main"
 
+# Apps Script Execution API may run server-side for up to 6 minutes (the
+# script's max execution budget). Our cross_aggregate handler caps at
+# 4.5 min via CacheService resumption, but the HTTP socket must outlive
+# that — default httplib2 timeout (~60s) trips way before the function
+# returns. 360s gives the script plenty of room to either complete or
+# emit its "incomplete" resumption response.
+_LONG_RUN_TIMEOUT_S = 360
+
 
 @lru_cache(maxsize=8)
 def _service(account: str = DEFAULT_ACCOUNT):
-    return build("script", "v1", credentials=get_credentials(account), cache_discovery=False)
+    """Build the Apps Script API client with a long socket timeout suitable
+    for cross_aggregate-style requests that take minutes server-side."""
+    creds = get_credentials(account)
+    http = google_auth_httplib2.AuthorizedHttp(
+        creds, http=httplib2.Http(timeout=_LONG_RUN_TIMEOUT_S),
+    )
+    return build(
+        "script", "v1",
+        http=http,
+        cache_discovery=False,
+        requestBuilder=RetryingHttpRequest,
+    )
 
 
 def create_project(
@@ -95,6 +117,141 @@ def run_function(
     }
 
 
+def _format_err(e: Exception) -> str:
+    """Concise, agent-readable exception string. HttpError gets status + body
+    excerpt so the agent can act on it (404, 403/insufficient_scope, etc.)
+    instead of a bare class name."""
+    try:
+        from googleapiclient.errors import HttpError
+        if isinstance(e, HttpError):
+            status = getattr(getattr(e, "resp", None), "status", "?")
+            return f"HttpError {status}: {str(e)[:350]}"
+    except Exception:
+        pass
+    return f"{type(e).__name__}: {str(e)[:350]}"
+
+
+def _classify(e: Exception) -> dict:
+    """Adapter that returns the `_meta` shape the failure dicts embed."""
+    kind, status = _classify_exception(e)
+    return {"error_kind": kind, "http_status": status}
+
+
+REQUIRED_SCOPES = (
+    "https://www.googleapis.com/auth/script.projects",
+    "https://www.googleapis.com/auth/script.deployments",
+    "https://www.googleapis.com/auth/script.scriptapp",
+)
+
+
+def status(script_id: str | None = None, account: str = DEFAULT_ACCOUNT) -> dict:
+    """Health check for the Apps Script API on `account`. Useful BEFORE
+    `apps_script_api_run_ad_hoc` to confirm scopes and GCP-project alignment
+    without burning a temp project on a doomed call.
+
+    Checks:
+      1. OAuth token has the three required script.* scopes
+      2. API is reachable — verified by `projects.get(script_id)` if
+         `script_id` is given, else by the Phase 14 aggregator if configured,
+         else skipped (api_reachable=None — scope-only result).
+
+    Returns:
+      {
+        ok: bool,
+        account: str,
+        scopes: {required: [...], granted: [...], missing: [...]},
+        api_reachable: bool | None,    # None = couldn't test (no script_id)
+        api_error: str | None,         # set when api_reachable=False
+        api_meta: {error_kind, http_status} | None,
+        aggregator: {script_id, accessible, title?, error?} | None,
+      }
+    """
+    out: dict[str, Any] = {
+        "ok": True,
+        "account": account,
+        "scopes": {
+            "required": list(REQUIRED_SCOPES),
+            "granted": [],
+            "missing": list(REQUIRED_SCOPES),
+        },
+        "api_reachable": None,
+        "api_error": None,
+        "api_meta": None,
+        "aggregator": None,
+    }
+
+    # Step 1: scopes (read straight from the token JSON — credentials object
+    # often nulls .scopes after refresh per src/auth.py notes).
+    try:
+        from src.auth import _token_path
+        tp = _token_path(account)
+        if not tp.exists():
+            out["ok"] = False
+            out["scope_check_error"] = f"no token for account {account!r}"
+            return out
+        token_data = json.loads(tp.read_text(encoding="utf-8"))
+        granted = list(token_data.get("scopes") or [])
+        out["scopes"]["granted"] = granted
+        out["scopes"]["missing"] = [s for s in REQUIRED_SCOPES if s not in granted]
+    except Exception as e:
+        out["ok"] = False
+        out["scope_check_error"] = _format_err(e)
+        return out
+
+    if out["scopes"]["missing"]:
+        out["ok"] = False
+        # Don't try the API roundtrip — it'll fail with auth_scope anyway.
+        return out
+
+    # Step 2: pick a target script for the API ping.
+    target_id = script_id
+    used_aggregator = False
+    if target_id is None:
+        try:
+            from src.tools._phase14_config import (
+                get_aggregator_script_id, Phase14ConfigError,
+            )
+            target_id = get_aggregator_script_id()
+            used_aggregator = True
+        except Phase14ConfigError:
+            target_id = None
+        except Exception:
+            # Unexpected config error — treat as no aggregator
+            target_id = None
+
+    if target_id is None:
+        # No way to test API reachability without making a destructive call.
+        out["api_reachable"] = None
+        out["api_error"] = (
+            "scopes look fine; pass script_id (or configure Phase 14 "
+            "aggregator) to verify API reachability + GCP project alignment"
+        )
+        return out
+
+    # Step 3: ping. projects.get is the cheapest read on the API.
+    try:
+        meta = _service(account).projects().get(scriptId=target_id).execute()
+        out["api_reachable"] = True
+        if used_aggregator:
+            out["aggregator"] = {
+                "script_id": target_id,
+                "accessible": True,
+                "title": meta.get("title"),
+            }
+    except Exception as e:
+        out["ok"] = False
+        out["api_reachable"] = False
+        out["api_error"] = _format_err(e)
+        out["api_meta"] = _classify(e)
+        if used_aggregator:
+            out["aggregator"] = {
+                "script_id": target_id,
+                "accessible": False,
+                "error": _format_err(e),
+            }
+    return out
+
+
 def run_ad_hoc(
     code: str,
     function_name: str = "main",
@@ -113,18 +270,37 @@ def run_ad_hoc(
     library is wired up at `library_symbol` (default 'Mylib') — useful for
     testing a library's exported functions.
 
-    Returns the same shape as run_function: {ok, result | error_type+...}
-    plus {script_id, script_url}. If keep_project=True, the script stays
-    in the account's Drive so you can inspect/run it again.
+    Returns the same shape as run_function on success: {ok, result | error_type+...}
+    plus {script_id, script_url}. If keep_project=True, the script stays in
+    the account's Drive so you can inspect/run it again.
+
+    On API-level failure of create/update/run, returns a structured per-step
+    diagnostic instead of raising:
+        {ok: False, step, error, script_id?, script_url?,
+         cleanup_attempted, cleanup_failed, _meta: {error_kind, http_status}}
+    The most common cause is GCP-project drift on the freshly-created script —
+    `step` tells the user which API call to look at.
 
     Use this for: testing a library function with real arguments, ad-hoc
-    poke-the-system scripts, "what does this WB token return" checks.
+    poke-the-system scripts, "what does this WB token return" checks. For
+    simple aggregations prefer `sheets_query`.
     """
     import json as _json
 
-    title = function_name + "-test-" + __import__("uuid").uuid4().hex[:6]
-    proj = create_project(title=title, account=account)
-    script_id = proj["scriptId"]
+    # Step 1: create temp project. No script_id to clean up on failure.
+    try:
+        title = function_name + "-test-" + __import__("uuid").uuid4().hex[:6]
+        proj = create_project(title=title, account=account)
+        script_id = proj["scriptId"]
+    except Exception as e:
+        return {
+            "ok": False,
+            "step": "create_project",
+            "error": _format_err(e),
+            "_meta": _classify(e),
+        }
+
+    script_url = f"https://script.google.com/d/{script_id}/edit"
 
     manifest: dict[str, Any] = {
         "timeZone": "Etc/UTC",
@@ -142,28 +318,65 @@ def run_ad_hoc(
             }]
         }
 
-    update_content(script_id, [
-        {"name": "appsscript", "type": "JSON", "source": _json.dumps(manifest, ensure_ascii=False, indent=2)},
-        {"name": "Code", "type": "SERVER_JS", "source": code},
-    ], account=account)
+    # Step 2: push manifest + code. On failure, best-effort delete the orphan.
+    try:
+        update_content(script_id, [
+            {"name": "appsscript", "type": "JSON", "source": _json.dumps(manifest, ensure_ascii=False, indent=2)},
+            {"name": "Code", "type": "SERVER_JS", "source": code},
+        ], account=account)
+    except Exception as e:
+        cleanup_failed = _try_delete_script(script_id, account)
+        return {
+            "ok": False,
+            "step": "update_content",
+            "script_id": script_id,
+            "script_url": script_url,
+            "error": _format_err(e),
+            "cleanup_attempted": True,
+            "cleanup_failed": cleanup_failed,
+            "_meta": _classify(e),
+        }
 
-    result = run_function(
-        script_id=script_id,
-        function_name=function_name,
-        params=params,
-        dev_mode=True,
-        account=account,
-    )
+    # Step 3: run. HttpError here usually = GCP-project mismatch on the new
+    # project (Apps Script API not enabled for that project).
+    try:
+        result = run_function(
+            script_id=script_id,
+            function_name=function_name,
+            params=params,
+            dev_mode=True,
+            account=account,
+        )
+    except Exception as e:
+        cleanup_failed = _try_delete_script(script_id, account)
+        return {
+            "ok": False,
+            "step": "run_function",
+            "script_id": script_id,
+            "script_url": script_url,
+            "error": _format_err(e),
+            "cleanup_attempted": True,
+            "cleanup_failed": cleanup_failed,
+            "_meta": _classify(e),
+        }
+
     result["script_id"] = script_id
-    result["script_url"] = f"https://script.google.com/d/{script_id}/edit"
+    result["script_url"] = script_url
 
     if not keep_project:
-        from src.tools import drive as _drive
-        try:
-            _drive.delete(script_id, account=account)
-        except Exception:
+        if _try_delete_script(script_id, account):
             result["cleanup_failed"] = True
     return result
+
+
+def _try_delete_script(script_id: str, account: str) -> bool:
+    """Best-effort delete. Returns True if cleanup itself failed."""
+    from src.tools import drive as _drive
+    try:
+        _drive.delete(script_id, account=account)
+        return False
+    except Exception:
+        return True
 
 
 def run_smart(
@@ -194,7 +407,7 @@ def run_smart(
                 return {**r, "path_taken": "scripts.run dev"}
             attempts.append({"step": "scripts.run dev", "ok": False, "err": r.get("error_message")})
         except Exception as e:
-            attempts.append({"step": "scripts.run dev", "err": str(e)[:200]})
+            attempts.append({"step": "scripts.run dev", "err": _format_err(e), **_classify(e)})
 
         # Attempt 2: scripts.run with pinned deployment
         try:
@@ -205,7 +418,7 @@ def run_smart(
                 return {**r, "path_taken": "scripts.run pinned"}
             attempts.append({"step": "scripts.run pinned", "ok": False, "err": r.get("error_message")})
         except Exception as e:
-            attempts.append({"step": "scripts.run pinned", "err": str(e)[:200]})
+            attempts.append({"step": "scripts.run pinned", "err": _format_err(e), **_classify(e)})
 
     # Attempt 3: Playwright menu click on the spreadsheet
     if spreadsheet_id and custom_menu_path:
@@ -220,9 +433,23 @@ def run_smart(
             )
             return {"ok": True, "path_taken": "playwright menu", "click_info": r}
         except Exception as e:
-            attempts.append({"step": "playwright menu", "err": str(e)[:200]})
+            attempts.append({"step": "playwright menu", "err": _format_err(e), **_classify(e)})
 
-    return {"ok": False, "attempts": attempts, "hint": "Provide custom_menu_path+spreadsheet_id for Playwright fallback"}
+    # Top-level _meta reflects the LAST attempt's kind — that's the most
+    # specific clue about why we ended up failing the cascade.
+    top_meta = None
+    for a in reversed(attempts):
+        if "error_kind" in a:
+            top_meta = {"error_kind": a["error_kind"], "http_status": a.get("http_status", 0)}
+            break
+    out: dict[str, Any] = {
+        "ok": False,
+        "attempts": attempts,
+        "hint": "Provide custom_menu_path+spreadsheet_id for Playwright fallback",
+    }
+    if top_meta is not None:
+        out["_meta"] = top_meta
+    return out
 
 
 def triggers_install_one_shot(
@@ -247,7 +474,8 @@ def triggers_install_one_shot(
             .create();
         return {{installed: true, function: "{function_name}", fires_in_min: {delay_minutes}}};
     }}"""
-    # Push the install function, run it, then we leave it (harmless)
+    # Push the install function, then run it. Two API steps — surface which
+    # one failed so the agent can act on the actual cause (scope vs GCP drift).
     try:
         edit_file(
             script_id=script_id,
@@ -256,17 +484,32 @@ def triggers_install_one_shot(
             file_type="SERVER_JS",
             account=account,
         )
-        r = run_function(script_id, "__install_oneshot", dev_mode=True, account=account)
-        return {
-            "ok": r.get("ok"),
-            "triggered_function": function_name,
-            "fires_at_iso": fire_at,
-            "result": r.get("result") if r.get("ok") else r.get("error_message"),
-        }
     except Exception as e:
-        return {"ok": False, "triggered_function": function_name,
-                "error": f"{type(e).__name__}: {str(e)[:200]}",
-                "hint": "Likely GCP project mismatch — use browser_set_script_gcp_project first"}
+        return {
+            "ok": False,
+            "step": "edit_file",
+            "triggered_function": function_name,
+            "error": _format_err(e),
+            "hint": "Likely GCP project mismatch — use browser_set_script_gcp_project first",
+            "_meta": _classify(e),
+        }
+    try:
+        r = run_function(script_id, "__install_oneshot", dev_mode=True, account=account)
+    except Exception as e:
+        return {
+            "ok": False,
+            "step": "run_function",
+            "triggered_function": function_name,
+            "error": _format_err(e),
+            "hint": "Likely GCP project mismatch — use browser_set_script_gcp_project first",
+            "_meta": _classify(e),
+        }
+    return {
+        "ok": r.get("ok"),
+        "triggered_function": function_name,
+        "fires_at_iso": fire_at,
+        "result": r.get("result") if r.get("ok") else r.get("error_message"),
+    }
 
 
 def triggers_list(script_id: str, account: str = DEFAULT_ACCOUNT) -> dict:
@@ -285,11 +528,27 @@ def triggers_list(script_id: str, account: str = DEFAULT_ACCOUNT) -> dict:
     }"""
     try:
         edit_file(script_id=script_id, file_name="__TriggerLister", new_source=code, file_type="SERVER_JS", account=account)
-        r = run_function(script_id, "__list_triggers", dev_mode=True, account=account)
-        return {"ok": r.get("ok"), "triggers": r.get("result", []) if r.get("ok") else None, "error": r.get("error_message")}
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}",
-                "hint": "Likely GCP project mismatch — use browser_set_script_gcp_project first"}
+        return {
+            "ok": False,
+            "step": "edit_file",
+            "script_id": script_id,
+            "error": _format_err(e),
+            "hint": "Likely GCP project mismatch — use browser_set_script_gcp_project first",
+            "_meta": _classify(e),
+        }
+    try:
+        r = run_function(script_id, "__list_triggers", dev_mode=True, account=account)
+    except Exception as e:
+        return {
+            "ok": False,
+            "step": "run_function",
+            "script_id": script_id,
+            "error": _format_err(e),
+            "hint": "Likely GCP project mismatch — use browser_set_script_gcp_project first",
+            "_meta": _classify(e),
+        }
+    return {"ok": r.get("ok"), "triggers": r.get("result", []) if r.get("ok") else None, "error": r.get("error_message")}
 
 
 def triggers_remove(script_id: str, trigger_id: str | None = None, function_name: str | None = None,
@@ -307,10 +566,29 @@ def triggers_remove(script_id: str, trigger_id: str | None = None, function_name
     )
     try:
         edit_file(script_id=script_id, file_name="__TriggerRemover", new_source=code, file_type="SERVER_JS", account=account)
-        r = run_function(script_id, "__remove_triggers", dev_mode=True, account=account)
-        return {"ok": r.get("ok"), "result": r.get("result") if r.get("ok") else r.get("error_message")}
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+        return {
+            "ok": False,
+            "step": "edit_file",
+            "script_id": script_id,
+            "trigger_id": trigger_id,
+            "function_name": function_name,
+            "error": _format_err(e),
+            "_meta": _classify(e),
+        }
+    try:
+        r = run_function(script_id, "__remove_triggers", dev_mode=True, account=account)
+    except Exception as e:
+        return {
+            "ok": False,
+            "step": "run_function",
+            "script_id": script_id,
+            "trigger_id": trigger_id,
+            "function_name": function_name,
+            "error": _format_err(e),
+            "_meta": _classify(e),
+        }
+    return {"ok": r.get("ok"), "result": r.get("result") if r.get("ok") else r.get("error_message")}
 
 
 def create_deployment(
@@ -520,11 +798,11 @@ def find_bound_script(spreadsheet_id: str, account: str = DEFAULT_ACCOUNT) -> li
 
     candidates: list[dict] = []
     # Scripts the account OWNS (not shared)
-    for f in _drive.list_files(folder_id="root", page_size=200, account=account):
+    for f in _drive.list_files(folder_id="root", page_size=200, account=account).get("files", []):
         if f.get("mimeType") == "application/vnd.google-apps.script":
             candidates.append({"id": f["id"], "name": f.get("name")})
     # Also try a general scan via search of all scripts
-    for f in _drive.search("", mime_type="application/vnd.google-apps.script", page_size=200, account=account):
+    for f in _drive.search("", mime_type="application/vnd.google-apps.script", page_size=200, account=account).get("files", []):
         if f.get("mimeType") == "application/vnd.google-apps.script":
             if not any(c["id"] == f["id"] for c in candidates):
                 candidates.append({"id": f["id"], "name": f.get("name")})
@@ -706,17 +984,45 @@ def edit_file(
     file_name: str,
     new_source: str,
     file_type: str = "SERVER_JS",
+    dry_run: bool = False,
     account: str = DEFAULT_ACCOUNT,
 ) -> dict:
     """Convenience macro: read project, replace ONE file's source (or add it
     if missing), push back. Other files are preserved verbatim. Use this for
     'edit file X in script Y' without re-reading and re-sending the whole
     project manually.
-    """
+
+    With `dry_run=True` fetches the current project, reports whether the file
+    exists (so the action would be `created` vs `replaced`) and the size diff,
+    WITHOUT writing. Critical because Apps Script API's `update_content` is a
+    full PUT — a buggy edit would clobber the entire project."""
     content = get_content(script_id, account=account)
     files = list(content.get("files", []))
 
     idx = next((i for i, f in enumerate(files) if f.get("name") == file_name), None)
+    if dry_run:
+        old_source = files[idx].get("source", "") if idx is not None else ""
+        return {
+            "dry_run": True,
+            "executed": False,
+            "plan": {
+                "would_call": "apps_script.projects.updateContent",
+                "script_id": script_id,
+                "file_name": file_name,
+                "action": "created" if idx is None else "replaced",
+                "old_bytes": len(old_source),
+                "new_bytes": len(new_source),
+                "delta_bytes": len(new_source) - len(old_source),
+                "files_in_project": [f.get("name") for f in files],
+                "reversibility": (
+                    "Reversible via apps_script_api_create_version BEFORE "
+                    "the edit (pin the current state) then "
+                    "apps_script_api_get_content on the old version. The "
+                    "Apps Script web UI also shows a version history."
+                ),
+            },
+            "_meta": {"native_preview": True},
+        }
     if idx is None:
         files.append({"name": file_name, "type": file_type, "source": new_source})
         action = "created"

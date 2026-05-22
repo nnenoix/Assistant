@@ -1,9 +1,16 @@
-"""Agent-facing tools for the people registry (see src/people.py)."""
+"""Agent-facing tools for the LOCAL name→account alias registry (NOT
+Google Contacts — that's `contacts_*`, see src/tools/contacts.py).
+
+Distinguishes between:
+  - aliases_* (THIS module): internal cache mapping nicknames/aliases to
+    Google account aliases — «Лена» → account='elena'. No Google API.
+  - contacts_* (src/tools/contacts.py): real Google Contacts via People API.
+"""
 from src import people as _impl
 
 
-def list_people() -> list[dict]:
-    """All registered people. Each entry has id, account, names, email, note."""
+def list_all() -> list[dict]:
+    """All registered aliases. Each entry has id, account, names, email, note."""
     return _impl.list_people()
 
 

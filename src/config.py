@@ -65,6 +65,13 @@ SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",       # GCP API enable, Cloud Logging, project list
     "https://www.googleapis.com/auth/calendar",             # events, free-busy, calendars list
     "https://www.googleapis.com/auth/tasks",                # Google Tasks (todo lists, reminders)
+    "https://www.googleapis.com/auth/documents",            # Google Docs — read/write
+    "https://www.googleapis.com/auth/presentations",        # Google Slides — read/write
+    "https://www.googleapis.com/auth/forms.body",           # Google Forms — create/edit form structure
+    "https://www.googleapis.com/auth/forms.responses.readonly",  # Forms — read submissions
+    "https://www.googleapis.com/auth/contacts.readonly",    # Google Contacts (People API) — read
+    "https://www.googleapis.com/auth/contacts",             # Google Contacts — write
+    "https://www.googleapis.com/auth/gmail.settings.basic", # Gmail filters (CRUD) — gmail.modify alone isn't enough
 ]
 
 DEFAULT_MODEL = "claude-sonnet-4-6"

@@ -8,10 +8,31 @@ because the server thread is a daemon.
 Usage:
     uv run python -m src.desktop
 """
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+
+
+# ── hide subprocess consoles in the frozen GUI build ──────────────────────
+# When PyInstaller builds with `console=False`, the parent exe has no console.
+# Any CONSOLE child process (claude CLI, clasp, gcloud, etc.) then gets a fresh
+# black cmd window because Windows can't attach it to a non-existent parent
+# console. Setting CREATE_NO_WINDOW on every subprocess.Popen suppresses that
+# allocation. Applied only in the frozen build so dev-mode subprocess output
+# still streams to the developer's terminal.
+if sys.platform == "win32" and getattr(sys, "frozen", False):
+    _CREATE_NO_WINDOW = 0x08000000
+    _orig_popen_init = subprocess.Popen.__init__
+
+    def _popen_init_hidden(self, *args, **kwargs):
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _CREATE_NO_WINDOW
+        return _orig_popen_init(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = _popen_init_hidden
+
 
 import uvicorn
 import webview

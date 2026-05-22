@@ -18,7 +18,7 @@ from functools import lru_cache
 
 from googleapiclient.discovery import build
 
-from src.auth import get_credentials
+from src.auth import RetryingHttpRequest, get_credentials
 from src.tools.gcp import DEFAULT_PROJECT_NUMBER
 
 
@@ -27,7 +27,12 @@ DEFAULT_ACCOUNT = "main"
 
 @lru_cache(maxsize=8)
 def _logging(account: str = DEFAULT_ACCOUNT):
-    return build("logging", "v2", credentials=get_credentials(account), cache_discovery=False)
+    return build(
+        "logging", "v2",
+        credentials=get_credentials(account),
+        cache_discovery=False,
+        requestBuilder=RetryingHttpRequest,
+    )
 
 
 def read_logs(

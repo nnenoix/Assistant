@@ -10,7 +10,7 @@ from typing import Any
 
 from googleapiclient.discovery import build
 
-from src.auth import get_credentials
+from src.auth import RetryingHttpRequest, get_credentials
 
 
 DEFAULT_ACCOUNT = "main"
@@ -19,7 +19,12 @@ DEFAULT_TZ = "Europe/Moscow"
 
 @lru_cache(maxsize=8)
 def _service(account: str = DEFAULT_ACCOUNT):
-    return build("calendar", "v3", credentials=get_credentials(account), cache_discovery=False)
+    return build(
+        "calendar", "v3",
+        credentials=get_credentials(account),
+        cache_discovery=False,
+        requestBuilder=RetryingHttpRequest,
+    )
 
 
 def _parse_when(value: str, tz: str = DEFAULT_TZ) -> dict[str, Any]:
@@ -59,12 +64,18 @@ def list_events(
     max_results: int = 50,
     query: str | None = None,
     account: str = DEFAULT_ACCOUNT,
-) -> list[dict]:
+) -> dict:
     """Events in a date range. `time_min`/`time_max` accept 'YYYY-MM-DD' or
     RFC3339. Defaults to today through next 7 days. `query` filters by text
     in event title/description/location.
+
+    Returns {events, _meta}. `_meta.window` echoes the EXACT time range
+    that was queried, plus `default_used: bool` flagging when the caller
+    omitted dates and the 7-day default kicked in — surface this in the
+    answer so users know what window was actually scanned.
     """
     now = datetime.now(timezone.utc)
+    default_used = time_min is None and time_max is None
     if time_min is None:
         time_min = now.isoformat()
     elif "T" not in time_min:
@@ -102,7 +113,26 @@ def list_events(
             "link": e.get("htmlLink"),
             "status": e.get("status"),
         })
-    return out
+
+    truncated = bool(resp.get("nextPageToken"))
+    return {
+        "events": out,
+        "_meta": {
+            "window": {
+                "time_min": time_min,
+                "time_max": time_max,
+                "calendar_id": calendar_id,
+                "default_used": default_used,
+            },
+            "returned_count": len(out),
+            "truncated": truncated,
+            "truncation_reason": (
+                "more events exist past max_results; raise max_results (cap 250) or narrow the window"
+                if truncated else None
+            ),
+            "empty_reason": None if out else "no_matches",
+        },
+    }
 
 
 def get_event(event_id: str, calendar_id: str = "primary", account: str = DEFAULT_ACCOUNT) -> dict:
@@ -120,12 +150,16 @@ def create_event(
     calendar_id: str = "primary",
     reminder_minutes: int | None = 15,
     timezone_str: str = DEFAULT_TZ,
+    recurrence: list[str] | None = None,
     account: str = DEFAULT_ACCOUNT,
 ) -> dict:
     """Create a new event.
     - start/end: 'YYYY-MM-DD' (all-day) or 'YYYY-MM-DD HH:MM' (timed)
     - end defaults to start + 1 hour (for timed) or same day (for all-day)
     - reminder_minutes adds a popup reminder N minutes before; None = no reminder
+    - recurrence is a list of RFC5545 RRULE strings, e.g.
+      ['RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10']. See calendar_freebusy and
+      calendar_list_recurring_instances for working with recurring events.
     """
     start_obj = _parse_when(start, timezone_str)
     if end is None:
@@ -149,6 +183,8 @@ def create_event(
             "useDefault": False,
             "overrides": [{"method": "popup", "minutes": max(0, reminder_minutes)}],
         }
+    if recurrence:
+        body["recurrence"] = recurrence
 
     resp = _service(account).events().insert(calendarId=calendar_id, body=body).execute()
     return {
@@ -178,9 +214,48 @@ def update_event(
 def delete_event(
     event_id: str,
     calendar_id: str = "primary",
+    dry_run: bool = False,
     account: str = DEFAULT_ACCOUNT,
 ) -> dict:
-    _service(account).events().delete(calendarId=calendar_id, eventId=event_id).execute()
+    """Delete a calendar event. With `dry_run=True` fetches event metadata
+    (summary, start, attendees) and returns a preview WITHOUT deleting."""
+    svc = _service(account)
+    if dry_run:
+        try:
+            ev = svc.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        except Exception as e:
+            return {
+                "dry_run": True,
+                "executed": False,
+                "plan": {
+                    "would_call": "calendar.events.delete",
+                    "event_id": event_id,
+                    "calendar_id": calendar_id,
+                    "preview_error": str(e)[:200],
+                },
+                "_meta": {"native_preview": True},
+            }
+        return {
+            "dry_run": True,
+            "executed": False,
+            "plan": {
+                "would_call": "calendar.events.delete",
+                "event_id": event_id,
+                "calendar_id": calendar_id,
+                "summary": ev.get("summary"),
+                "start": ev.get("start"),
+                "end": ev.get("end"),
+                "attendees": [a.get("email") for a in (ev.get("attendees") or [])],
+                "organizer": ev.get("organizer", {}).get("email"),
+                "reversibility": (
+                    "NOT REVERSIBLE via API. Deleted events go to Calendar "
+                    "trash (visible in UI for ~30 days); restore manually if "
+                    "needed. Attendees may receive cancellation notifications."
+                ),
+            },
+            "_meta": {"native_preview": True},
+        }
+    svc.events().delete(calendarId=calendar_id, eventId=event_id).execute()
     return {"deleted": True, "event_id": event_id}
 
 
@@ -272,3 +347,264 @@ def quick_reminder(
         reminder_minutes=reminder_minutes,
         account=account,
     )
+
+
+# -------- Phase 6: group / multi-attendee ops --------
+
+def _to_rfc3339(value: str) -> str:
+    """Normalize a date or datetime string to RFC3339 (UTC if no zone)."""
+    if "T" in value:
+        return value
+    return f"{value}T00:00:00Z"
+
+
+def freebusy(
+    emails: list[str],
+    time_min: str,
+    time_max: str,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Query free/busy slots across one or more calendars (by email).
+
+    `emails` is a list of calendar IDs (typically email addresses).
+    `time_min`/`time_max` accept date or RFC3339. Returns:
+        {per_email: [{email, busy: [{start, end}], errors: [...]}], _meta: {time_min, time_max}}.
+
+    For one's own calendar pass the address (or 'primary' wouldn't work
+    here — FreeBusy needs full IDs).
+    """
+    tmin = _to_rfc3339(time_min)
+    tmax = _to_rfc3339(time_max)
+    resp = _service(account).freebusy().query(body={
+        "timeMin": tmin,
+        "timeMax": tmax,
+        "items": [{"id": e} for e in emails],
+    }).execute()
+    cals = resp.get("calendars", {}) or {}
+    out = []
+    for e in emails:
+        info = cals.get(e, {})
+        out.append({
+            "email": e,
+            "busy": info.get("busy", []),
+            "errors": info.get("errors", []),
+        })
+    return {
+        "per_email": out,
+        "_meta": {
+            "time_min": tmin,
+            "time_max": tmax,
+            "queried_emails": emails,
+        },
+    }
+
+
+def find_meeting_slot(
+    attendees: list[str],
+    duration_minutes: int,
+    time_min: str,
+    time_max: str,
+    working_hours_only: bool = True,
+    work_hours_start: int = 9,
+    work_hours_end: int = 19,
+    weekdays_only: bool = True,
+    tz: str = DEFAULT_TZ,
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Find the FIRST common free slot of `duration_minutes` across all
+    `attendees` (calendar IDs / emails) in [time_min, time_max].
+
+    Builds on freebusy(): merges busy intervals from all attendees, walks
+    the window with `duration_minutes` step and returns the first slot where
+    everyone is free. Optionally restricts to working hours / weekdays.
+
+    Working hours and weekday filters are evaluated in `tz` (default
+    ``Europe/Moscow``). Without this the filter applies in UTC, so "9–19
+    Moscow" silently becomes "12–22 Moscow" — wrong slots get returned and
+    the midnight-rollover branch fires at the wrong instant.
+
+    Returns {found: bool, slot?: {start, end}, candidates_checked, _meta}.
+    """
+    from zoneinfo import ZoneInfo
+    target_tz = ZoneInfo(tz)
+
+    fb = freebusy(attendees, time_min, time_max, account=account)
+    # Merge all busy intervals across attendees
+    busy: list[tuple[datetime, datetime]] = []
+    for entry in fb["per_email"]:
+        for b in entry["busy"]:
+            busy.append((datetime.fromisoformat(b["start"].replace("Z", "+00:00")),
+                         datetime.fromisoformat(b["end"].replace("Z", "+00:00"))))
+    busy.sort()
+
+    tmin = datetime.fromisoformat(_to_rfc3339(time_min).replace("Z", "+00:00"))
+    tmax = datetime.fromisoformat(_to_rfc3339(time_max).replace("Z", "+00:00"))
+    duration = timedelta(minutes=duration_minutes)
+
+    candidate = tmin
+    checked = 0
+    while candidate + duration <= tmax:
+        checked += 1
+        end = candidate + duration
+        # Working hours / weekday filter — evaluated in caller's tz, not UTC
+        local = candidate.astimezone(target_tz)
+        local_end = end.astimezone(target_tz)
+        if weekdays_only and local.weekday() >= 5:
+            # Skip to next Monday 09:00 local
+            days_ahead = 7 - local.weekday()
+            next_local = (local + timedelta(days=days_ahead)).replace(
+                hour=work_hours_start, minute=0, second=0, microsecond=0,
+            )
+            candidate = next_local.astimezone(timezone.utc)
+            continue
+        if working_hours_only:
+            if local.hour < work_hours_start:
+                next_local = local.replace(
+                    hour=work_hours_start, minute=0, second=0, microsecond=0,
+                )
+                candidate = next_local.astimezone(timezone.utc)
+                continue
+            crosses_midnight = local_end.date() != local.date()
+            past_end = (
+                local_end.hour > work_hours_end
+                or (local_end.hour == work_hours_end and local_end.minute > 0)
+            )
+            if crosses_midnight or past_end:
+                # Skip to next day's working start (local-tz)
+                next_local = (local + timedelta(days=1)).replace(
+                    hour=work_hours_start, minute=0, second=0, microsecond=0,
+                )
+                candidate = next_local.astimezone(timezone.utc)
+                continue
+        # Check overlap with any busy interval
+        overlap = False
+        for b_start, b_end in busy:
+            if candidate < b_end and end > b_start:
+                # Move candidate to b_end (rounded up to next 15-min mark)
+                candidate = b_end
+                # Round up to next 15-min
+                discard = candidate.minute % 15
+                if discard:
+                    candidate += timedelta(minutes=(15 - discard))
+                candidate = candidate.replace(second=0, microsecond=0)
+                overlap = True
+                break
+        if overlap:
+            continue
+        # Found a free slot
+        return {
+            "found": True,
+            "slot": {"start": candidate.isoformat(), "end": end.isoformat()},
+            "candidates_checked": checked,
+            "_meta": {
+                "attendees": attendees,
+                "duration_minutes": duration_minutes,
+                "time_min": time_min,
+                "time_max": time_max,
+                "tz": tz,
+            },
+        }
+    return {
+        "found": False,
+        "slot": None,
+        "candidates_checked": checked,
+        "_meta": {
+            "attendees": attendees,
+            "duration_minutes": duration_minutes,
+            "time_min": time_min,
+            "time_max": time_max,
+            "tz": tz,
+            "reason": "no overlapping free slot found within working hours",
+        },
+    }
+
+
+def list_recurring_instances(
+    event_id: str,
+    time_min: str,
+    time_max: str,
+    calendar_id: str = "primary",
+    account: str = DEFAULT_ACCOUNT,
+) -> dict:
+    """Expand a recurring event series into individual instances within
+    [time_min, time_max].
+
+    Use after `calendar_create_event(..., recurrence=['RRULE:FREQ=WEEKLY...'])`
+    to see WHEN exactly the future instances fall. Returns {instances, _meta}.
+    """
+    tmin = _to_rfc3339(time_min)
+    tmax = _to_rfc3339(time_max)
+    resp = _service(account).events().instances(
+        calendarId=calendar_id,
+        eventId=event_id,
+        timeMin=tmin,
+        timeMax=tmax,
+        maxResults=250,
+        showDeleted=False,
+    ).execute()
+    instances = []
+    for e in resp.get("items", []):
+        instances.append({
+            "id": e.get("id"),
+            "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date")),
+            "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date")),
+            "status": e.get("status"),
+            "recurringEventId": e.get("recurringEventId"),
+        })
+    return {
+        "instances": instances,
+        "_meta": {
+            "event_id": event_id,
+            "time_min": tmin,
+            "time_max": tmax,
+            "count": len(instances),
+            "empty_reason": None if instances else "no_instances_in_window",
+        },
+    }
+
+
+def overlay_accounts(
+    emails_per_account: dict[str, list[str]],
+    time_min: str,
+    time_max: str,
+) -> dict:
+    """Run FreeBusy across multiple configured `account` aliases AT ONCE,
+    each with its own list of calendar IDs to query. Returns a single map
+    keyed by account → emails → busy intervals.
+
+    Useful when consolidating «свободно ли всё подразделение» across two
+    Google accounts (e.g. main + shared).
+
+    `emails_per_account` example: {"main": ["a@x.com"], "shared": ["b@y.com", "c@y.com"]}
+    """
+    from src.tools._errors import _classify_exception
+
+    out: dict[str, dict] = {}
+    errors: list[dict] = []
+    for acct, emails in emails_per_account.items():
+        try:
+            out[acct] = freebusy(emails, time_min, time_max, account=acct)
+        except Exception as e:
+            kind, status = _classify_exception(e)
+            err_payload = {
+                "account": acct,
+                "kind": type(e).__name__,
+                "error_kind": kind,
+                "http_status": status,
+                "message": str(e)[:300],
+            }
+            errors.append(err_payload)
+            out[acct] = {"error": err_payload, "per_email": []}
+    meta: dict = {
+        "accounts": list(emails_per_account.keys()),
+        "time_min": _to_rfc3339(time_min),
+        "time_max": _to_rfc3339(time_max),
+    }
+    if errors:
+        meta["errors"] = errors[:5]
+        meta["error_count"] = len(errors)
+        meta["warning"] = (
+            f"{len(errors)}/{len(emails_per_account)} accounts failed; "
+            "per-account dicts under per_account[<acct>].error carry details."
+        )
+    return {"per_account": out, "_meta": meta}

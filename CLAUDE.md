@@ -63,3 +63,25 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+## Project context (READ FIRST in a fresh session)
+
+This is the **Google Workspace Chat Agent** — local Python FastAPI + pywebview
+app driving Drive/Sheets/Docs/Slides/Gmail/Calendar/Apps Script/Forms/Tasks/
+Contacts via Claude. 226 tools registered. 365 unit tests passing.
+
+**Before doing anything substantive, read `docs/HANDOFF.md`** — current state
+across 13 completed phases + Phase 14 plan (production-scale 100×7M chars).
+
+**Phase 14 is approved but not yet implemented.** Tasks #33-#40 in the task
+list describe sub-phases. Detailed plan in `docs/PHASE_14_PLAN.md`.
+
+**Key environment for testing:**
+```powershell
+$env:LIVE_GOOGLE_TESTS = "1"  # enable integration tests against egor.titt@gmail.com / CLAUDE-TEST/
+```
+
+**Stress test bottleneck found:** `verify_claim` serial loop = p50 47s for 50 refs.
+Phase 14D (parallelization) is the cheapest, highest-leverage start point.

@@ -13,7 +13,7 @@ from functools import lru_cache
 
 from googleapiclient.discovery import build
 
-from src.auth import get_credentials
+from src.auth import RetryingHttpRequest, get_credentials
 
 
 DEFAULT_ACCOUNT = "main"
@@ -22,12 +22,22 @@ DEFAULT_PROJECT_NUMBER = "148389149001"  # Our OAuth client's GCP project
 
 @lru_cache(maxsize=8)
 def _serviceusage(account: str = DEFAULT_ACCOUNT):
-    return build("serviceusage", "v1", credentials=get_credentials(account), cache_discovery=False)
+    return build(
+        "serviceusage", "v1",
+        credentials=get_credentials(account),
+        cache_discovery=False,
+        requestBuilder=RetryingHttpRequest,
+    )
 
 
 @lru_cache(maxsize=8)
 def _resourcemanager(account: str = DEFAULT_ACCOUNT):
-    return build("cloudresourcemanager", "v1", credentials=get_credentials(account), cache_discovery=False)
+    return build(
+        "cloudresourcemanager", "v1",
+        credentials=get_credentials(account),
+        cache_discovery=False,
+        requestBuilder=RetryingHttpRequest,
+    )
 
 
 def enable_api(

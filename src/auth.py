@@ -17,8 +17,28 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.http import HttpRequest
 
 from src.config import CLIENT_SECRET_PATH, DATA_DIR, SCOPES
+
+
+class RetryingHttpRequest(HttpRequest):
+    """googleapiclient HttpRequest with num_retries defaulted to 5.
+
+    googleapiclient already implements exponential backoff for transient
+    failures (429 rate-limit, 5xx, network errors) — see
+    `googleapiclient.http._retry_request` / `_should_retry_response` — but
+    only when `num_retries > 0` is passed to `.execute()`. We bake in a
+    sane default so every call site benefits without sprinkling
+    `num_retries=` everywhere.
+
+    Sheets per-user-per-minute quota refills inside the retry window
+    (~62s worst-case across 5 retries), so transient 429s recover
+    transparently instead of bubbling up as tool errors.
+    """
+
+    def execute(self, http=None, num_retries=0):
+        return super().execute(http=http, num_retries=max(num_retries, 5))
 
 
 TOKENS_DIR = DATA_DIR / "tokens"
@@ -52,20 +72,80 @@ def remove_account(account: str) -> dict:
     return {"removed": True, "account": account}
 
 
+def rename_account(old_alias: str, new_alias: str) -> dict:
+    """Rename a token alias. Moves .data/tokens/<old>.json to <new>.json.
+    Returns {ok, old, new, error?}. Refuses if the destination already
+    exists (would clobber another account's token).
+
+    Case-only renames (``main`` → ``Main``) on case-insensitive filesystems
+    (Windows/macOS-default) need a two-step rename via a temp path —
+    otherwise the FS treats source and dest as the same file and the rename
+    silently keeps the old casing."""
+    new_alias = new_alias.strip()
+    if not new_alias:
+        return {"ok": False, "error": "новое имя пустое"}
+    if any(c in new_alias for c in "/\\:*?\"<>|"):
+        return {"ok": False, "error": "имя содержит запрещённые символы /\\:*?\"<>|"}
+    src = _token_path(old_alias)
+    if not src.exists():
+        return {"ok": False, "error": f"аккаунта {old_alias!r} нет"}
+    dst = _token_path(new_alias)
+    case_only = old_alias.lower() == new_alias.lower() and old_alias != new_alias
+    if dst.exists() and dst != src and not case_only:
+        return {"ok": False, "error": f"имя {new_alias!r} уже занято"}
+    if old_alias == new_alias:
+        return {"ok": True, "old": old_alias, "new": new_alias, "noop": True}
+    if case_only:
+        tmp = src.with_name(f".__rename__{new_alias}.tmp")
+        src.rename(tmp)
+        tmp.rename(dst)
+    else:
+        src.rename(dst)
+    return {"ok": True, "old": old_alias, "new": new_alias}
+
+
 def get_credentials(account: str = "main") -> Credentials:
-    """Return valid credentials for `account`, refreshing or running browser flow as needed."""
+    """Return valid credentials for `account`, refreshing or running browser flow as needed.
+
+    On refresh, we deliberately don't pass `scopes` (neither config.SCOPES
+    nor the stored ones) so google-auth doesn't send a `scope` param to
+    Google's token endpoint. That avoids `invalid_scope` errors when
+    config.SCOPES grows beyond what the existing token was granted —
+    Google simply returns an access token for whatever scopes the refresh
+    token already covers. The actual scope coverage is re-read from the
+    refresh response and persisted back to the file.
+    """
     _migrate_legacy()
     path = _token_path(account)
     creds: Credentials | None = None
 
     if path.exists():
-        creds = Credentials.from_authorized_user_file(str(path), SCOPES)
+        # Load with scopes=None: from_authorized_user_info will fall back to
+        # whatever 'scopes' key is in the JSON. Passing SCOPES would override
+        # that ONLY if the JSON lacked 'scopes' (rare on our tokens).
+        # Critically, we then DROP creds.scopes to None before refresh so the
+        # request body has no `scope` param — see docstring.
+        creds = Credentials.from_authorized_user_file(str(path))
 
     if creds and creds.valid:
         return creds
 
     if creds and creds.expired and creds.refresh_token:
+        # Refresh without sending scope param to avoid invalid_scope on
+        # tokens that pre-date config.SCOPES expansions.
+        original_scopes = creds.scopes
+        try:
+            creds._scopes = None  # google-auth uses this attr to build the request body
+        except Exception:
+            pass
         creds.refresh(Request())
+        # Restore granted scopes (refresh response carries them) so callers
+        # that introspect creds.scopes see the real grant, not None.
+        if not creds.scopes and original_scopes:
+            try:
+                creds._scopes = original_scopes
+            except Exception:
+                pass
     else:
         flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
         creds = flow.run_local_server(port=0)
@@ -106,7 +186,7 @@ def add_account_auto() -> dict:
 
     # Find the bound Google identity
     from googleapiclient.discovery import build as _build
-    svc = _build("drive", "v3", credentials=creds, cache_discovery=False)
+    svc = _build("drive", "v3", credentials=creds, cache_discovery=False, requestBuilder=RetryingHttpRequest)
     user = svc.about().get(fields="user(emailAddress,displayName)").execute()["user"]
     email = user["emailAddress"]
     name = user.get("displayName")
@@ -169,7 +249,7 @@ def describe_account(account: str = "main") -> dict:
     except Exception as e:
         return {"account": account, "error": f"no token: {e}"}
     try:
-        svc = _build("drive", "v3", credentials=creds, cache_discovery=False)
+        svc = _build("drive", "v3", credentials=creds, cache_discovery=False, requestBuilder=RetryingHttpRequest)
         u = svc.about().get(fields="user(emailAddress,displayName)").execute()["user"]
         return {
             "account": account,

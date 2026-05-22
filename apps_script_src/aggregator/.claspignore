@@ -1,0 +1,4 @@
+# Only push Code.gs and appsscript.json to Google
+**/**
+!Code.gs
+!appsscript.json

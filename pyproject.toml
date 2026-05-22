@@ -19,6 +19,11 @@ dependencies = [
     "pandas>=3.0.3",
     "pdfplumber>=0.11.9",
     "pillow>=12.2.0",
+    "beautifulsoup4>=4.14.3",
+    "reportlab>=4.5.1",
+    "lxml>=6.1.1",
+    "python-docx>=1.1.0",
+    "openai>=1.0.0",
 ]
 
 [dependency-groups]
@@ -29,7 +34,47 @@ dev = [
     "pyinstaller>=6.20.0",
 ]
 
+# Optional dependencies for marketplace / ML / analytics tool families.
+# All marketplace tools work without these — they're for the Russian
+# integrations + local ML wrappers that lazy-import their backends.
+#
+# Install per-feature:
+#   uv pip install -e ".[ml]"       # Natasha NER, sentence-transformers
+#   uv pip install -e ".[ocr]"      # pytesseract + paddleocr
+#   uv pip install -e ".[analytics]"# duckdb + pandera
+#   uv pip install -e ".[all]"      # everything above
+[project.optional-dependencies]
+ml = [
+    "natasha>=1.6.0",
+    "pymorphy3>=2.0.0",  # natasha runtime dep
+]
+ocr = [
+    "pytesseract>=0.3.10",
+    "pdf2image>=1.17.0",
+    # paddleocr is heavy (~500MB models); install on demand:
+    #   pip install paddleocr paddlepaddle
+]
+analytics = [
+    "duckdb>=1.4.0",
+    "pandera>=0.20.0",
+]
+imap = [
+    # imaplib is in stdlib; nothing to install. Kept as a placeholder so
+    # `[imap]` extra is a documented entry point.
+]
+all = [
+    "natasha>=1.6.0",
+    "pymorphy3>=2.0.0",
+    "pytesseract>=0.3.10",
+    "pdf2image>=1.17.0",
+    "duckdb>=1.4.0",
+    "pandera>=0.20.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["."]
+markers = [
+    "integration: hits live Google APIs against egor.titt@gmail.com / CLAUDE-TEST folder; requires LIVE_GOOGLE_TESTS=1 env var to actually run (otherwise auto-skipped)",
+]

@@ -431,6 +431,15 @@ async def remove_account_api(alias: str):
     return auth.remove_account(alias)
 
 
+class RenameAccountRequest(BaseModel):
+    new_alias: str
+
+
+@app.post("/api/accounts/{alias}/rename")
+async def rename_account_api(alias: str, req: RenameAccountRequest):
+    return auth.rename_account(alias, req.new_alias)
+
+
 # -------- Model selection --------
 
 class SetModelRequest(BaseModel):

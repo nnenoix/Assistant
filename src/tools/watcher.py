@@ -210,7 +210,15 @@ def poll_known_scripts(
     try:
         r = recent_failures(since_minutes=since_minutes, account=account)
     except Exception as e:
-        errors.append({"error": f"{type(e).__name__}: {str(e)[:160]}"})
+        from src.tools._errors import _classify_exception
+        kind, status = _classify_exception(e)
+        errors.append({
+            "step": "recent_failures",
+            "kind": type(e).__name__,
+            "error_kind": kind,
+            "http_status": status,
+            "message": str(e)[:200],
+        })
         return {
             "checked_scripts": len(known),
             "total_failures_seen": 0,
@@ -218,6 +226,7 @@ def poll_known_scripts(
             "alerts_added": [],
             "errors": errors,
             "next_check_in_min": since_minutes,
+            "_meta": {"error_kind": kind, "http_status": status},
         }
 
     for f in r["failures"]:

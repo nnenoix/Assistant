@@ -193,3 +193,80 @@ def self_git_revert(path: str) -> dict:
         "path": str(p),
         "stderr": (proc.stderr or "")[-300:],
     }
+
+
+def self_run_tests(pattern: str = "tests/test_*.py", deselect: list[str] | None = None) -> dict:
+    """Run pytest on the given path/pattern. Beyond self_smoke_test (which
+    only verifies imports), this actually runs the test suite. Use after a
+    self_edit before committing.
+
+    `pattern` is passed to pytest as the positional arg (file/dir/pattern).
+    `deselect` is a list of `--deselect <nodeid>` items — useful for skipping
+    known-failing pre-existing tests.
+
+    Returns {ok, passed, failed, skipped, exit_code, summary, output}.
+    """
+    cmd = ["uv", "run", "pytest", pattern, "-q", "--tb=line"]
+    for d in deselect or []:
+        cmd.extend(["--deselect", d])
+    proc = subprocess.run(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300,
+    )
+    out = proc.stdout or ""
+    err = proc.stderr or ""
+    # Parse pytest summary line, e.g. "115 passed, 3 skipped in 2.28s"
+    import re
+    summary_match = re.search(
+        r"(\d+) passed(?:, (\d+) failed)?(?:, (\d+) skipped)?",
+        out,
+    )
+    passed = int(summary_match.group(1)) if summary_match else 0
+    failed = int(summary_match.group(2)) if summary_match and summary_match.group(2) else 0
+    skipped = int(summary_match.group(3)) if summary_match and summary_match.group(3) else 0
+    # Final summary line (last non-empty line of pytest output is usually most useful)
+    last_lines = [ln for ln in out.splitlines() if ln.strip()][-5:]
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "summary": "\n".join(last_lines),
+        "stderr": err[-500:] if err else "",
+        "pattern": pattern,
+    }
+
+
+def self_list_tools() -> dict:
+    """Introspect every registered agent tool. Returns {tools: [{name, policy_op,
+    description, has_account_param}], _meta:{count}}.
+
+    Useful for the agent's own self-orientation: «какие у меня инструменты
+    под X» without scanning the registry source.
+    """
+    from src.tools import registry
+
+    out = []
+    for spec in registry.TOOLS:
+        has_acct = (
+            spec.get("schema", {})
+            .get("input_schema", {})
+            .get("properties", {})
+            .get("account") is not None
+        )
+        out.append({
+            "name": spec["name"],
+            "policy_op": spec["policy_op"],
+            "description": spec["schema"]["description"][:200],
+            "has_account_param": has_acct,
+        })
+    return {
+        "tools": out,
+        "_meta": {
+            "count": len(out),
+            "policy_ops": sorted({t["policy_op"] for t in out}),
+        },
+    }

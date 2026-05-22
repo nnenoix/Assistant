@@ -392,7 +392,14 @@ def set_script_gcp_project(
             "browser_channel": channel_used,
         }
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+        from src.tools._errors import _classify_exception
+        kind, status = _classify_exception(e)
+        return {
+            "ok": False,
+            "error": str(e)[:300],
+            "exception_type": type(e).__name__,
+            "_meta": {"error_kind": kind, "http_status": status},
+        }
     finally:
         try:
             ctx.close()

@@ -282,9 +282,17 @@
     padding: 8px 12px;
     background: var(--surface);
     cursor: pointer;
-    user-select: none;
     transition: background .12s;
   }
+  /* Children that should still feel "chrome-like" — clicking them toggles
+     the card, not selecting their text. (The args preview is intentionally
+     selectable so users can grab spreadsheet_id without expanding.) */
+  .tool-head .tool-icon,
+  .tool-head .tool-name,
+  .tool-head .tool-account,
+  .tool-head .tool-status,
+  .tool-head .tool-chev { user-select: none; }
+  .tool-head .tool-args-preview { user-select: text; cursor: text; }
   .tool-head:hover { background: var(--surface-2); }
   .tool-icon {
     width: 22px; height: 22px;
@@ -346,6 +354,33 @@
   .copy-btn.copied { color: var(--ok-text); border-color: rgba(22,163,74,0.35); background: var(--ok-soft); opacity: 1; }
   .copy-btn svg { width: 12px; height: 12px; }
   .bubble-wrap { padding-right: 4px; }
+
+  /* Inline variant — sits as a flex child instead of absolute-positioned.
+     Used in the tool head so users can copy the params JSON without expanding. */
+  .copy-btn-inline {
+    position: static;
+    top: auto; right: auto;
+    flex: 0 0 auto;
+  }
+  .tool-head:hover .copy-btn-inline { opacity: 1; }
+
+  /* Copy button on the user (blue) bubble — needs different colors to read
+     against the primary background. */
+  .bubble-user .copy-btn {
+    background: rgba(255,255,255,0.14);
+    border-color: rgba(255,255,255,0.22);
+    color: var(--user-bubble-tx);
+  }
+  .bubble-user .copy-btn:hover {
+    background: rgba(255,255,255,0.24);
+    border-color: rgba(255,255,255,0.4);
+    color: var(--user-bubble-tx);
+  }
+  .bubble-user .copy-btn.copied {
+    background: rgba(34,197,94,0.28);
+    border-color: rgba(34,197,94,0.55);
+    color: #ecfdf5;
+  }
   .tool-status {
     display: inline-flex; align-items: center; gap: 4px;
     font-family: var(--sans);
@@ -417,6 +452,50 @@
     display: flex; align-items: flex-start; gap: 10px;
   }
   .fatal svg { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 2px; }
+
+  /* reply-lint banner — fires when reply_self_check flagged the last assistant text */
+  .reply-lint {
+    border: 1px solid var(--warn-soft);
+    background: var(--warn-soft);
+    color: var(--warn-text);
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    font-size: 12.5px;
+    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .reply-lint svg { width: 14px; height: 14px; flex: 0 0 auto; margin-top: 2px; }
+  .reply-lint-chev { color: var(--text-3); font-size: 11px; }
+  .reply-lint-list {
+    flex-basis: 100%;
+    margin: 6px 0 0; padding: 0 0 0 16px;
+    list-style: disc;
+    font-size: 12px;
+  }
+  .reply-lint-list li { margin: 4px 0; }
+  .reply-lint-list code {
+    font-family: var(--mono);
+    background: rgba(0,0,0,0.08);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 11.5px;
+  }
+  .reply-lint-suggestion { color: var(--text-2); margin-top: 2px; font-size: 11.5px; }
+
+  /* tool-focus badge — fires once per turn when dynamic tool routing narrowed the session */
+  .tool-focus-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 11.5px;
+    color: var(--text-3);
+    line-height: 1;
+    align-self: flex-start;
+  }
+  .tool-focus-badge svg { width: 11px; height: 11px; }
 
   /* thinking indicator */
   .thinking {
@@ -944,6 +1023,7 @@ import {
   ChevronRight, TriangleAlert, Send, ShieldCheck, Sparkles, RefreshCw,
   Users, Copy, Check, Box, Sun, Moon,
   Paperclip, X, File, FileText, Image,
+  Pencil, Filter,
 } from "https://esm.sh/lucide-preact@0.475.0?deps=preact@10.22.0";
 
 const html = htm.bind(h);
@@ -981,6 +1061,8 @@ const ICONS = {
   file: File,
   "file-text": FileText,
   image: Image,
+  pencil: Pencil,
+  filter: Filter,
 };
 const Icon = ({ name, size = 14, ...rest }) => {
   const Comp = ICONS[name] || ICONS.box;
@@ -1017,7 +1099,7 @@ function argPreview(input) {
 }
 
 /* ── copy button ─────────────────────────────────────────────────── */
-function CopyButton({ getText, title = "Скопировать" }) {
+function CopyButton({ getText, title = "Скопировать", inline = false }) {
   const [copied, setCopied] = useState(false);
   const onClick = async (e) => {
     e.stopPropagation();
@@ -1035,8 +1117,11 @@ function CopyButton({ getText, title = "Скопировать" }) {
     setCopied(true);
     setTimeout(() => setCopied(false), 1400);
   };
+  const cls = "copy-btn"
+    + (inline ? " copy-btn-inline" : "")
+    + (copied ? " copied" : "");
   return html`
-    <button class=${"copy-btn" + (copied ? " copied" : "")} onClick=${onClick} title=${title}>
+    <button class=${cls} onClick=${onClick} title=${title}>
       <${Icon} name=${copied ? "check" : "copy"} size=${12} />
       ${copied ? "Скопировано" : "Копировать"}
     </button>
@@ -1058,9 +1143,17 @@ function ToolCard({ tool }) {
   const acct = rawAcct || "main";
   const isDefaultAcct = !rawAcct;
 
+  // Drag-selecting text in the header should NOT toggle the card.
+  // If a non-empty selection exists when the click fires, treat it as
+  // a select gesture and bail out.
+  const onHeadClick = (e) => {
+    if ((window.getSelection?.()?.toString() || "").length > 0) return;
+    setOpen(o => !o);
+  };
+
   return html`
     <div class=${"tool" + (tool.error ? " err" : "") + (open ? " open" : "")}>
-      <div class="tool-head" onClick=${() => setOpen(o => !o)}>
+      <div class="tool-head" onClick=${onHeadClick}>
         <span class="tool-icon">
           <${Icon} name=${toolIcon(tool.name)} size=${13} />
         </span>
@@ -1071,6 +1164,11 @@ function ToolCard({ tool }) {
           <span class="chip-dot"></span>${acct}
         </span>
         ${status}
+        <${CopyButton}
+          inline=${true}
+          title="Скопировать параметры в JSON"
+          getText=${() => JSON.stringify(tool.input ?? {}, null, 2)}
+        />
         <span class="tool-chev"><${Icon} name="chevron" size=${14} /></span>
       </div>
       ${open && html`
@@ -1113,12 +1211,47 @@ function DeniedBadge({ name }) {
 }
 function FatalBlock({ msg }) {
   return html`
-    <div class="fatal">
+    <div class="fatal copy-host">
       <${Icon} name="alert" />
       <div>
         <div style="font-weight:600;margin-bottom:2px;">Произошла фатальная ошибка</div>
         <div style="font-family:var(--mono);font-size:12.5px;word-break:break-all;">${msg}</div>
       </div>
+      <${CopyButton} getText=${() => msg || ""} title="Скопировать текст ошибки" />
+    </div>
+  `;
+}
+
+/* ── tool-focus badge — fires when dynamic tool routing narrowed the session */
+function ToolFocusBadge({ categories, source }) {
+  if (!categories || !categories.length) return null;
+  return html`
+    <div class="tool-focus-badge" title=${`Session restricted to ${categories.length} categor${categories.length === 1 ? "y" : "ies"} (source: ${source})`}>
+      <${Icon} name="filter" />
+      <span>Tool focus: ${categories.join(", ")}</span>
+    </div>
+  `;
+}
+
+/* ── reply-lint banner — fires when reply_self_check flags the previous text */
+function ReplyLintBanner({ warnings, summary }) {
+  const [open, setOpen] = useState(false);
+  if (!warnings || !warnings.length) return null;
+  return html`
+    <div class="reply-lint" onClick=${() => setOpen(o => !o)} title="Подробнее">
+      <${Icon} name="alert" />
+      <span>В ответе ${summary || `${warnings.length} непривязанных значений`}</span>
+      <span class="reply-lint-chev">${open ? "▾" : "▸"}</span>
+      ${open && html`
+        <ul class="reply-lint-list">
+          ${warnings.map((w, i) => html`
+            <li key=${i}>
+              <strong>${w.kind}</strong>: <code>${(w.snippet || "").slice(0, 90)}</code>
+              ${w.suggestion && html`<div class="reply-lint-suggestion">${w.suggestion}</div>`}
+            </li>
+          `)}
+        </ul>
+      `}
     </div>
   `;
 }
@@ -1205,6 +1338,8 @@ function AccountsModal({ open, onClose }) {
   const [data, setData] = useState(null);        // { alias: { email, name, scopes, error? } }
   const [busy, setBusy] = useState(null);        // alias being mutated, or "__add__"
   const [error, setError] = useState(null);
+  const [editingAlias, setEditingAlias] = useState(null);   // alias currently in edit mode
+  const [editValue, setEditValue] = useState("");
 
   const fetchAccounts = useCallback(async () => {
     // Retry on transient errors (server still booting, port races, etc.)
@@ -1258,6 +1393,40 @@ function AccountsModal({ open, onClose }) {
     }
   };
 
+  const startEdit = (alias) => {
+    setEditingAlias(alias);
+    setEditValue(alias);
+    setError(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingAlias(null);
+    setEditValue("");
+  };
+
+  const saveRename = async (oldAlias) => {
+    const newAlias = editValue.trim();
+    if (!newAlias || newAlias === oldAlias) { cancelEdit(); return; }
+    setBusy(oldAlias);
+    try {
+      const r = await fetch(`/api/accounts/${encodeURIComponent(oldAlias)}/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_alias: newAlias }),
+      }).then(r => r.json());
+      if (!r.ok) {
+        setError(r.error || "Не получилось переименовать");
+      } else {
+        cancelEdit();
+        await fetchAccounts();
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const entries = data ? Object.entries(data) : [];
 
   return html`
@@ -1278,8 +1447,35 @@ function AccountsModal({ open, onClose }) {
           `}
           ${entries.map(([alias, info]) => html`
             <div key=${alias} style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border);">
-              <div style="min-width: 0;">
-                <div style="font-weight: 600;">${alias}</div>
+              <div style="min-width: 0; flex: 1;">
+                <div style="font-weight: 600; display: flex; align-items: center; gap: 6px;">
+                  ${editingAlias === alias
+                    ? html`
+                        <input
+                          type="text"
+                          value=${editValue}
+                          autofocus
+                          onInput=${e => setEditValue(e.target.value)}
+                          onKeyDown=${e => {
+                            if (e.key === "Enter") saveRename(alias);
+                            else if (e.key === "Escape") cancelEdit();
+                          }}
+                          style="flex: 1; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text-1); font: inherit; font-weight: 600;"
+                        />
+                        <button class="header-link icon-only" disabled=${busy === alias} onClick=${() => saveRename(alias)} title="Сохранить">
+                          <${Icon} name="check" />
+                        </button>
+                        <button class="header-link icon-only" onClick=${cancelEdit} title="Отмена">
+                          <${Icon} name="x" />
+                        </button>
+                      `
+                    : html`
+                        <span>${alias}</span>
+                        <button class="header-link icon-only" onClick=${() => startEdit(alias)} title="Переименовать" style="padding: 4px;">
+                          <${Icon} name="pencil" size=${12} />
+                        </button>
+                      `}
+                </div>
                 <div style="color: var(--text-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                   ${info?.email || (info?.error ? `⚠ ${info.error.slice(0, 60)}` : "—")}
                   ${info?.name && html` · <span style="color: var(--text-3);">${info.name}</span>`}
@@ -1288,7 +1484,7 @@ function AccountsModal({ open, onClose }) {
               <button
                 class="header-link"
                 style="background: var(--danger-soft); color: var(--danger-text); border-color: rgba(185,28,28,0.4);"
-                disabled=${busy === alias}
+                disabled=${busy === alias || editingAlias === alias}
                 onClick=${() => removeAccount(alias)}
               >
                 ${busy === alias ? "…" : "Удалить"}
@@ -1569,10 +1765,12 @@ function fmtSize(b) {
 
 /* ── render one assistant event ──────────────────────────────────── */
 function AssistantEvent({ ev }) {
-  if (ev.kind === "text")     return html`<${Markdown} text=${ev.text} />`;
-  if (ev.kind === "tool")     return html`<${ToolCard} tool=${ev} />`;
-  if (ev.kind === "denied")   return html`<${DeniedBadge} name=${ev.name} />`;
-  if (ev.kind === "fatal")    return html`<${FatalBlock} msg=${ev.error} />`;
+  if (ev.kind === "text")        return html`<${Markdown} text=${ev.text} />`;
+  if (ev.kind === "tool")        return html`<${ToolCard} tool=${ev} />`;
+  if (ev.kind === "denied")      return html`<${DeniedBadge} name=${ev.name} />`;
+  if (ev.kind === "fatal")       return html`<${FatalBlock} msg=${ev.error} />`;
+  if (ev.kind === "reply_lint")  return html`<${ReplyLintBanner} warnings=${ev.warnings} summary=${ev.summary} />`;
+  if (ev.kind === "tool_focus")  return html`<${ToolFocusBadge} categories=${ev.categories} source=${ev.source} />`;
   return null;
 }
 
@@ -1581,7 +1779,7 @@ function Turn({ turn, isLast, isStreaming, awaitingFirstReply }) {
   if (turn.role === "user") {
     return html`
       <div class="turn-user">
-        <div class="bubble-user">
+        <div class="bubble-user copy-host">
           ${turn.text}
           ${turn.attachments && turn.attachments.length > 0 && html`
             <div class="attachments-row" style="margin-top: 8px;">
@@ -1593,6 +1791,7 @@ function Turn({ turn, isLast, isStreaming, awaitingFirstReply }) {
               `)}
             </div>
           `}
+          <${CopyButton} getText=${() => turn.text || ""} />
         </div>
       </div>
     `;
@@ -2046,6 +2245,24 @@ function App() {
       }
       case "fatal_error": {
         updateLastAsst(events => [...events, { kind: "fatal", error: ev.error, id: cryptoId() }]);
+        break;
+      }
+      case "reply_lint": {
+        updateLastAsst(events => [...events, {
+          kind: "reply_lint",
+          warnings: ev.warnings || [],
+          summary: ev.summary || "",
+          id: cryptoId(),
+        }]);
+        break;
+      }
+      case "tool_focus_applied": {
+        updateLastAsst(events => [...events, {
+          kind: "tool_focus",
+          categories: ev.categories || [],
+          source: ev.source || "auto",
+          id: cryptoId(),
+        }]);
         break;
       }
       case "alert": {
