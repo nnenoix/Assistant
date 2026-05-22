@@ -152,15 +152,19 @@ def approval_request(action: str, args: dict,
 
 def approval_decide(approval_id: str, status: str, decided_by: str = "user",
                     note: str | None = None) -> dict:
-    """Approve or deny a pending request. status: approved | denied."""
+    """Approve or deny a pending request. status: approved | denied. Refuses
+    if the LATEST state of the approval is not pending (no overturning
+    decisions after the fact)."""
     if status not in {"approved", "denied"}:
         return {"ok": False, "error": "status must be approved|denied"}
     records = _read_jsonl(_APPROVALS_PATH)
-    target = next((r for r in records if r.get("approval_id") == approval_id), None)
-    if target is None:
+    matching = [r for r in records if r.get("approval_id") == approval_id]
+    if not matching:
         return {"ok": False, "error": f"approval_id {approval_id!r} not found"}
-    if target["status"] != "pending":
-        return {"ok": False, "error": f"already {target['status']!r}"}
+    latest = matching[-1]
+    if latest["status"] != "pending":
+        return {"ok": False, "error": f"already {latest['status']!r}"}
+    target = matching[0]  # for the original args/action context
     decision = {
         **target,
         "status": status,

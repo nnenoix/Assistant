@@ -204,23 +204,35 @@ def finance_detail_collect(
     start_rrd_id: int = 0,
     sleep_sec: int = 65,
     max_pages: int | None = None,
+    response_format: str = "concise",
 ) -> dict:
     """Like finance_detail but accumulates all rows into memory and returns
-    {rows_count, last_rrd_id, pages, sample_first, sample_last}.
-    Useful for quick "how many transactions in March" checks.
+    summary stats. Useful for quick "how many transactions in March" checks.
+
+    `response_format`:
+      - "concise" (default): {rows_count, pages, last_rrd_id, sample_first,
+        sample_last} — agent gets total + 4 sample rows; can re-call with
+        `detailed` for the full grid if it needs every transaction.
+      - "detailed": same + `rows: [...]` with EVERY row. Can be tens of MB.
     """
+    if response_format not in {"concise", "detailed"}:
+        raise ValueError(f"response_format must be 'concise' or 'detailed', got {response_format!r}")
     all_rows: list[dict] = []
     pages = 0
     for page in finance_detail(token, date_from, date_to, limit, start_rrd_id, sleep_sec, max_pages):
         all_rows.extend(page)
         pages += 1
-    return {
+    out: dict = {
         "rows_count": len(all_rows),
         "pages": pages,
         "last_rrd_id": all_rows[-1]["rrd_id"] if all_rows else None,
         "sample_first": all_rows[:2],
         "sample_last": all_rows[-2:],
+        "_meta": {"response_format": response_format},
     }
+    if response_format == "detailed":
+        out["rows"] = all_rows
+    return out
 
 
 # ---------- Batch 1: WB marketplace read-only extensions ----------

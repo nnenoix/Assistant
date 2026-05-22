@@ -1931,7 +1931,7 @@ TOOLS = [
         "wb_finance_detail_collect",
         wb.finance_detail_collect,
         "drive.read",
-        "Fetch WB reportDetailByPeriod for [date_from..date_to]. Paginated by rrd_id, 65s pause between pages (WB rate-limit 1 req/min), honors X-Ratelimit-Retry. Returns {rows_count, last_rrd_id, pages, sample_first, sample_last}. Will raise immediately if recent run consumed budget — 12h ban risk.",
+        "Fetch WB reportDetailByPeriod for [date_from..date_to]. Paginated by rrd_id, 65s pause between pages (WB rate-limit 1 req/min), honors X-Ratelimit-Retry. Returns {rows_count, last_rrd_id, pages, sample_first, sample_last}. `response_format='concise'` (default) = sample only; 'detailed' adds full `rows` (can be tens of MB). Will raise immediately if recent run consumed budget — 12h ban risk.",
         {
             "type": "object",
             "properties": {
@@ -1942,6 +1942,7 @@ TOOLS = [
                 "start_rrd_id": {"type": "integer", "default": 0},
                 "sleep_sec": {"type": "integer", "default": 65, "description": "Pause between pages."},
                 "max_pages": {"type": "integer", "description": "Stop after N pages — useful for testing."},
+                "response_format": {"type": "string", "enum": ["concise", "detailed"], "default": "concise"},
             },
             "required": ["token", "date_from"],
         },
@@ -2057,15 +2058,15 @@ TOOLS = [
         "ozon_orders_fbo_list",
         ozon.orders_fbo_list,
         "drive.read",
-        "FBO postings via /v2/posting/fbo/list. Dates RFC3339 (`2026-05-01T00:00:00Z`). Includes analytics_data + financial_data.",
-        {"type": "object", "properties": {"client_id": {"type": "string"}, "api_key": {"type": "string"}, "date_from": {"type": "string"}, "date_to": {"type": "string"}, "limit": {"type": "integer", "default": 1000}, "offset": {"type": "integer", "default": 0}}, "required": ["client_id", "api_key", "date_from", "date_to"]},
+        "FBO postings via /v2/posting/fbo/list. Dates RFC3339 (`2026-05-01T00:00:00Z`). `response_format='concise'` (default) skips analytics_data+financial_data fields to save ~70% tokens; 'detailed' includes them.",
+        {"type": "object", "properties": {"client_id": {"type": "string"}, "api_key": {"type": "string"}, "date_from": {"type": "string"}, "date_to": {"type": "string"}, "limit": {"type": "integer", "default": 1000}, "offset": {"type": "integer", "default": 0}, "response_format": {"type": "string", "enum": ["concise", "detailed"], "default": "concise"}}, "required": ["client_id", "api_key", "date_from", "date_to"]},
     ),
     _tool(
         "ozon_orders_fbs_list",
         ozon.orders_fbs_list,
         "drive.read",
-        "FBS postings via /v3/posting/fbs/list. Optional `status`: awaiting_packaging / awaiting_deliver / delivered / cancelled.",
-        {"type": "object", "properties": {"client_id": {"type": "string"}, "api_key": {"type": "string"}, "date_from": {"type": "string"}, "date_to": {"type": "string"}, "limit": {"type": "integer", "default": 1000}, "offset": {"type": "integer", "default": 0}, "status": {"type": "string"}}, "required": ["client_id", "api_key", "date_from", "date_to"]},
+        "FBS postings via /v3/posting/fbs/list. Optional `status`: awaiting_packaging / awaiting_deliver / delivered / cancelled. `response_format='concise'` skips analytics+financial fields.",
+        {"type": "object", "properties": {"client_id": {"type": "string"}, "api_key": {"type": "string"}, "date_from": {"type": "string"}, "date_to": {"type": "string"}, "limit": {"type": "integer", "default": 1000}, "offset": {"type": "integer", "default": 0}, "status": {"type": "string"}, "response_format": {"type": "string", "enum": ["concise", "detailed"], "default": "concise"}}, "required": ["client_id", "api_key", "date_from", "date_to"]},
     ),
     _tool(
         "ozon_returns_list",
@@ -2883,8 +2884,8 @@ TOOLS = [
         "chats_search",
         chats.search,
         "chats.read",
-        "Substring search across ALL saved chats. Returns matches with short snippets so you can decide which chat to read in full. Use when the user references prior work ('что мы делали с таблицей X на прошлой неделе').",
-        {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]},
+        "Substring search across ALL saved chats. Returns matches with short snippets so you can decide which chat to read in full. Use when the user references prior work ('что мы делали с таблицей X на прошлой неделе'). `response_format='concise'` (default) returns chat_id+title+snippet[:200]; 'detailed' adds started_at+message_count+full snippet.",
+        {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "response_format": {"type": "string", "enum": ["concise", "detailed"], "default": "concise"}}, "required": ["query"]},
     ),
     _tool(
         "chats_search_semantic",

@@ -103,6 +103,23 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="Google Workspace Chat Agent", lifespan=_lifespan)
 
 
+@app.get("/health")
+async def _health():
+    """Liveness probe — used by Docker HEALTHCHECK + Kubernetes readinessProbe."""
+    return {"status": "ok"}
+
+
+# Phase 0: optionally expose MCP Streamable HTTP transport for external
+# clients (LibreChat, Open WebUI, etc.). Gated by ENABLE_MCP_HTTP=1 env;
+# no-op when off so the desktop app's local-only behavior is unchanged.
+try:
+    from src.mcp_http import mount_mcp_http
+    mount_mcp_http(app)
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).warning(f"MCP HTTP mount failed: {_e}")
+
+
 @app.middleware("http")
 async def _origin_gate(request, call_next):
     """Reject state-changing requests with a cross-origin `Origin` header.

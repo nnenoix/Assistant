@@ -106,24 +106,37 @@ def stocks_fbs(client_id: str, api_key: str, sku: list[str] | None = None) -> di
 
 
 def orders_fbo_list(client_id: str, api_key: str, date_from: str, date_to: str,
-                    limit: int = 1000, offset: int = 0) -> dict:
-    """FBO postings via `/v2/posting/fbo/list`. Dates RFC3339."""
+                    limit: int = 1000, offset: int = 0,
+                    response_format: str = "concise") -> dict:
+    """FBO postings via `/v2/posting/fbo/list`. Dates RFC3339.
+    response_format=concise → no analytics_data + financial_data (saves ~70% tokens)."""
+    if response_format not in {"concise", "detailed"}:
+        raise ValueError(f"response_format must be 'concise' or 'detailed', got {response_format!r}")
+    with_ = ({"analytics_data": True, "financial_data": True}
+             if response_format == "detailed" else {"analytics_data": False, "financial_data": False})
     return _json_call("/v2/posting/fbo/list", client_id, api_key, body={
         "filter": {"since": date_from, "to": date_to},
         "limit": limit, "offset": offset,
-        "with": {"analytics_data": True, "financial_data": True},
+        "with": with_,
     })
 
 
 def orders_fbs_list(client_id: str, api_key: str, date_from: str, date_to: str,
                     limit: int = 1000, offset: int = 0,
-                    status: str | None = None) -> dict:
+                    status: str | None = None,
+                    response_format: str = "concise") -> dict:
     """FBS postings via `/v3/posting/fbs/list`. Optional status filter:
-    awaiting_packaging / awaiting_deliver / delivered / cancelled / ..."""
+    awaiting_packaging / awaiting_deliver / delivered / cancelled / ...
+    response_format=concise → no analytics_data + financial_data."""
+    if response_format not in {"concise", "detailed"}:
+        raise ValueError(f"response_format must be 'concise' or 'detailed', got {response_format!r}")
+    with_ = ({"analytics_data": True, "financial_data": True, "barcodes": False}
+             if response_format == "detailed"
+             else {"analytics_data": False, "financial_data": False, "barcodes": False})
     body: dict = {
         "filter": {"since": date_from, "to": date_to},
         "limit": limit, "offset": offset,
-        "with": {"analytics_data": True, "financial_data": True, "barcodes": False},
+        "with": with_,
     }
     if status:
         body["filter"]["status"] = status

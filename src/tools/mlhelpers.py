@@ -27,7 +27,7 @@ _INN_RE_10 = re.compile(r"\b\d{10}\b")
 _INN_RE_12 = re.compile(r"\b\d{12}\b")
 _KPP_RE = re.compile(r"\b\d{9}\b")
 _BIK_RE = re.compile(r"\b04\d{7}\b")  # Russian bank BIC always starts with 04
-_PHONE_RE = re.compile(r"(?:\+7|8)[\s\-\(\)]?\d{3}[\s\-\(\)]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}")
+_PHONE_RE = re.compile(r"(?:\+7|8)[\s\-\(\)]*\d{3}[\s\-\(\)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}")
 _OGRN_RE = re.compile(r"\b\d{13}\b|\b\d{15}\b")
 
 

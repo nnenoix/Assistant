@@ -15,9 +15,24 @@ def read(chat_id: str) -> dict:
     return _impl.read_chat(chat_id)
 
 
-def search(query: str, limit: int = 10) -> list[dict]:
-    """Substring search across all saved chats. Returns matches with snippets."""
-    return _impl.search_chats(query=query, limit=limit)
+def search(query: str, limit: int = 10, response_format: str = "concise") -> dict:
+    """Substring search across all saved chats. Returns matches with snippets.
+
+    `response_format`:
+      - "concise" (default): per-match `{chat_id, title, snippet[:200]}`.
+      - "detailed": adds full `snippet`, `started_at`, `message_count`.
+    """
+    if response_format not in {"concise", "detailed"}:
+        raise ValueError(f"response_format must be 'concise' or 'detailed', got {response_format!r}")
+    matches = _impl.search_chats(query=query, limit=limit)
+    if response_format == "concise":
+        matches = [
+            {"chat_id": m.get("chat_id") or m.get("id"),
+             "title": m.get("title"),
+             "snippet": (m.get("snippet") or "")[:200]}
+            for m in matches
+        ]
+    return {"matches": matches, "_meta": {"response_format": response_format, "count": len(matches)}}
 
 
 def search_semantic(query: str, top_k: int = 8) -> dict:

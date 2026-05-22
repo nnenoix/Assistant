@@ -1,0 +1,43 @@
+# Phase 0 RBAC policy — first-match-wins.
+# Format: subject_group, action_glob, effect(allow|deny)
+#
+# `subject_group`: the OIDC group claim (Authentik group name). `*` = everyone.
+# `action_glob`: tool policy_op. `*` = anything; `prefix.*` = anything under that domain.
+# Default deny applies when no rule matches.
+
+# --- Admins: everything ---
+admin, *, allow
+
+# --- Finance team: read everything, write sheets/notes, NO send/delete ---
+finance, *.read, allow
+finance, *.list, allow
+finance, *.search, allow
+finance, sheets.write, allow
+finance, sheets.append, allow
+finance, sheets.update, allow
+finance, notes.*, allow
+finance, chats.read, allow
+finance, gmail.send, deny
+finance, drive.delete, deny
+finance, contacts.delete, deny
+
+# --- Ops team: run scripts + read all, but NO destructive sends ---
+ops, *.read, allow
+ops, *.list, allow
+ops, apps_script.*, allow
+ops, sheets.write, allow
+ops, drive.write, allow
+ops, drive.delete, deny
+ops, gmail.send, deny
+
+# --- Support: read-only ---
+support, *.read, allow
+support, *.list, allow
+support, *.search, allow
+support, *, deny
+
+# --- Default (no group): read-only too ---
+*, *.read, allow
+*, *.list, allow
+*, *.search, allow
+*, *, deny

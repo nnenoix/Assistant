@@ -1,0 +1,122 @@
+# Phase 0 stack — local-first command-service deployment.
+#
+# Starts the full backend: Postgres + Redis + Authentik + the agent itself.
+# Run: `docker compose up -d`
+# Stop: `docker compose down`
+# Reset: `docker compose down -v` (DROPS DATA).
+#
+# Postgres tables are created automatically on first start via Alembic
+# (see migrations/env.py — to be added).
+# Authentik admin: http://localhost:9000/if/admin/  (initial superuser
+# created via env vars below).
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_dev_only}
+      POSTGRES_DB: workspace_agent
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d workspace_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  authentik:
+    # Minimal Authentik server (skips outpost, embedded LDAP) for OIDC.
+    # On first start point a browser at http://localhost:9000/if/flow/initial-setup/
+    # to create the admin user.
+    image: ghcr.io/goauthentik/server:latest
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: agent
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD:-agent_dev_only}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-replace-me-in-prod}
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  agent:
+    build: .
+    restart: unless-stopped
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://agent:${POSTGRES_PASSWORD:-agent_dev_only}@postgres:5432/workspace_agent
+      REDIS_URL: redis://redis:6379/0
+      OIDC_ISSUER: ${OIDC_ISSUER:-http://authentik:9000/application/o/workspace-agent/}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-workspace-agent}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      ENABLE_MCP_HTTP: "1"
+    ports:
+      - "8765:8765"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - agent_data:/app/.data
+
+  arq_worker:
+    # Background queue worker — handles scheduled tasks + long-running jobs
+    # (apps_script_oneshot, sheets_iter_rows over huge books, etc.).
+    build: .
+    restart: unless-stopped
+    command: ["uv", "run", "arq", "src.queue.worker.WorkerSettings"]
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://agent:${POSTGRES_PASSWORD:-agent_dev_only}@postgres:5432/workspace_agent
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - agent_data:/app/.data
+
+  otel_collector:
+    # Optional: OpenTelemetry collector → Langfuse or stdout for dev.
+    image: otel/opentelemetry-collector-contrib:latest
+    restart: unless-stopped
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+
+volumes:
+  postgres_data:
+  redis_data:
+  agent_data:
