@@ -1,0 +1,43 @@
+# Prometheus scrape config for the agent stack.
+#
+# Add to docker-compose.yml under a `prometheus` service:
+#   image: prom/prometheus:latest
+#   volumes:
+#     - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+#     - prom_data:/prometheus
+#   ports: ["9090:9090"]
+#
+# Then visit http://localhost:9090 → Targets to see if the agent is up.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: workspace-agent
+    static_configs:
+      - targets: ["agent:8765"]
+    metrics_path: /metrics  # NB: not yet wired — needs prometheus_client
+                            # mounted under FastAPI. Track in followups.
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: agent
+
+  - job_name: arq_worker
+    static_configs:
+      - targets: ["arq_worker:9100"]
+    metrics_path: /metrics
+
+  - job_name: otel_collector
+    static_configs:
+      - targets: ["otel_collector:8888"]
+    metrics_path: /metrics
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres_exporter:9187"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis_exporter:9121"]

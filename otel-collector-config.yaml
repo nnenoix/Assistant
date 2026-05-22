@@ -22,8 +22,15 @@ processors:
 exporters:
   debug:
     verbosity: normal
-  # langfuse:
-  #   endpoint: ${env:LANGFUSE_HOST}
+  # Phoenix (Arize): OTLP/gRPC, no auth required for self-hosted.
+  # Uncomment to forward + run phoenix sidecar (see docker-compose).
+  # otlp/phoenix:
+  #   endpoint: phoenix:6006
+  #   tls:
+  #     insecure: true
+  # Langfuse: OTLP/HTTP, Basic auth (base64 of `pk:sk`).
+  # otlphttp/langfuse:
+  #   endpoint: ${env:LANGFUSE_HOST}/api/public/otel
   #   headers:
   #     authorization: Basic ${env:LANGFUSE_AUTH_B64}
 

@@ -103,13 +103,29 @@ def stocks_list(api_key: str, campaign_id: int, limit: int = 200,
 def orders_list(api_key: str, campaign_id: int,
                 from_date: str, to_date: str,
                 page: int = 1, page_size: int = 50,
-                status: str | None = None) -> dict:
+                status: str | None = None,
+                response_format: str = "concise") -> dict:
     """Orders for a campaign via /campaigns/{id}/orders. Dates DD-MM-YYYY.
-    status: PROCESSING / DELIVERY / DELIVERED / CANCELLED / PICKUP."""
+    status: PROCESSING / DELIVERY / DELIVERED / CANCELLED / PICKUP.
+
+    `response_format='concise'` (default) trims each order to {id, status,
+    creationDate, total, buyer.firstName}. 'detailed' returns the full row
+    (items array, shipments, delivery, etc.) — tens of KB per order."""
+    if response_format not in {"concise", "detailed"}:
+        raise ValueError(f"response_format must be 'concise' or 'detailed', got {response_format!r}")
     params: dict = {"fromDate": from_date, "toDate": to_date, "page": page, "pageSize": page_size}
     if status:
         params["status"] = status
-    return _json_call(f"/campaigns/{campaign_id}/orders", api_key, params=params)
+    out = _json_call(f"/campaigns/{campaign_id}/orders", api_key, params=params)
+    if out.get("ok") and response_format == "concise":
+        orders = ((out.get("data") or {}).get("orders") or [])
+        out["data"]["orders"] = [
+            {"id": o.get("id"), "status": o.get("status"),
+             "creationDate": o.get("creationDate"), "total": o.get("itemsTotal"),
+             "buyer_firstName": (o.get("buyer") or {}).get("firstName")}
+            for o in orders
+        ]
+    return out
 
 
 def order_get(api_key: str, campaign_id: int, order_id: int) -> dict:

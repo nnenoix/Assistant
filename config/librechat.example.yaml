@@ -1,0 +1,32 @@
+# LibreChat config snippet wiring the Workspace Agent as an MCP server.
+#
+# Drop into your LibreChat install's `librechat.yaml`. Replace
+# `${AGENT_BEARER}` with a Bearer token issued by your Authentik instance
+# for a service account that has the right RBAC groups.
+#
+# https://www.librechat.ai/docs/configuration/librechat_yaml/object_structure/mcp_servers
+
+version: 1.2.0
+
+mcpServers:
+  workspace-agent:
+    type: streamable-http
+    url: http://workspace-agent:8765/mcp
+    timeout: 60000
+    headers:
+      Authorization: "Bearer ${AGENT_BEARER}"
+      X-Tenant-Id: "${TENANT_ID:-default}"
+    # Limit which tools surface in the LibreChat UI — pick a workflow-specific
+    # subset to avoid overwhelming end users with all 403.
+    allowedTools:
+      - mcp__gworkagent__sheets_summarize
+      - mcp__gworkagent__sheets_query
+      - mcp__gworkagent__sheets_metric_lookup
+      - mcp__gworkagent__drive_search
+      - mcp__gworkagent__gmail_search
+      - mcp__gworkagent__calendar_list_events
+      - mcp__gworkagent__wb_stocks_v2
+      - mcp__gworkagent__wb_orders_recent
+      - mcp__gworkagent__ozon_check_credentials
+      - mcp__gworkagent__moysklad_profit_byproduct
+      - mcp__gworkagent__report_render_markdown

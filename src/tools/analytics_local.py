@@ -51,12 +51,27 @@ def duckdb_query(sql: str, max_rows: int = 1000) -> dict:
         conn.close()
 
 
-def duckdb_import_csv(table: str, path: str, replace: bool = False) -> dict:
+def duckdb_import_csv(table: str, path: str, replace: bool = False, dry_run: bool = False) -> dict:
     """Create or append to a DuckDB table from a local CSV. Pass
-    `replace=True` to overwrite existing rows."""
+    `replace=True` to overwrite existing rows. `dry_run=True` describes the
+    planned operation + counts rows in the CSV without modifying the DB."""
     conn, err = _connect()
     if err:
         return err
+    if dry_run:
+        try:
+            row_count = conn.execute(f"SELECT COUNT(*) FROM read_csv_auto('{path}')").fetchone()[0]
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [table],
+            ).fetchone()[0]
+            action = "replace" if (existing and replace) else ("append" if existing else "create")
+            return {"ok": True, "dry_run": True, "executed": False,
+                    "plan": {"action": action, "table": table,
+                             "csv_rows": row_count, "table_exists": bool(existing)},
+                    "_meta": {"native_preview": True}}
+        finally:
+            conn.close()
     try:
         ctas = "CREATE OR REPLACE TABLE" if replace else "CREATE TABLE IF NOT EXISTS"
         conn.execute(f"{ctas} {table} AS SELECT * FROM read_csv_auto('{path}')")
@@ -89,11 +104,30 @@ def duckdb_list_tables() -> dict:
         conn.close()
 
 
-def duckdb_drop_table(table: str) -> dict:
-    """Drop a table."""
+def duckdb_drop_table(table: str, dry_run: bool = False) -> dict:
+    """Drop a table. `dry_run=True` reports row count + columns that would
+    be lost without touching the DB."""
     conn, err = _connect()
     if err:
         return err
+    if dry_run:
+        try:
+            exists = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [table],
+            ).fetchone()[0]
+            if not exists:
+                return {"ok": True, "dry_run": True, "executed": False,
+                        "plan": {"would_drop": None, "note": f"table {table!r} doesn't exist"},
+                        "_meta": {"native_preview": True}}
+            row_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            cols = [r[0] for r in conn.execute(f"DESCRIBE {table}").fetchall()]
+            return {"ok": True, "dry_run": True, "executed": False,
+                    "plan": {"would_drop": table, "row_count": row_count, "columns": cols,
+                             "reversibility": "NOT REVERSIBLE — DuckDB has no soft-delete; restore from a recent export."},
+                    "_meta": {"native_preview": True}}
+        finally:
+            conn.close()
     try:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
         return {"ok": True, "data": {"dropped": table}}

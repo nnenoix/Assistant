@@ -109,6 +109,16 @@ async def _health():
     return {"status": "ok"}
 
 
+# Phase 0: tenant-id propagation middleware. Binds `request.state.tenant_id`
+# and ContextVar `src.tenancy.current_tenant_id()` for downstream tools.
+try:
+    from src.tenancy import add_tenant_middleware
+    add_tenant_middleware(app)
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).warning(f"tenant middleware install failed: {_e}")
+
+
 # Phase 0: optionally expose MCP Streamable HTTP transport for external
 # clients (LibreChat, Open WebUI, etc.). Gated by ENABLE_MCP_HTTP=1 env;
 # no-op when off so the desktop app's local-only behavior is unchanged.

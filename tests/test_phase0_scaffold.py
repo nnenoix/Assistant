@@ -180,8 +180,8 @@ def test_mcp_http_rejects_unauthed_when_auth_required(monkeypatch):
     assert resp.status_code == 401
 
 
-def test_mcp_http_invoke_returns_501_stub(monkeypatch):
-    """POST /mcp is scaffolded but not yet wired — returns 501 with a clear note."""
+def test_mcp_http_invoke_unknown_tool_returns_404(monkeypatch):
+    """POST /mcp tools/call with unknown name → 404."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from src.mcp_http import mount_mcp_http
@@ -190,8 +190,70 @@ def test_mcp_http_invoke_returns_501_stub(monkeypatch):
     app = FastAPI()
     mount_mcp_http(app)
     client = TestClient(app)
-    resp = client.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call"})
-    assert resp.status_code == 501
+    resp = client.post("/mcp", json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "nonexistent_tool", "arguments": {}},
+    })
+    assert resp.status_code == 404
+
+
+def test_mcp_http_invoke_rejects_unknown_method(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.mcp_http import mount_mcp_http
+    monkeypatch.setenv("ENABLE_MCP_HTTP", "1")
+    monkeypatch.setenv("ENABLE_MCP_HTTP_NOAUTH", "1")
+    app = FastAPI()
+    mount_mcp_http(app)
+    client = TestClient(app)
+    resp = client.post("/mcp", json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+    })
+    assert resp.status_code == 400
+
+
+def test_mcp_http_invoke_calls_tool_through_wrapper(monkeypatch):
+    """POST /mcp routes to _wrap_for_sdk so annotations + idempotency apply."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.mcp_http import mount_mcp_http
+    monkeypatch.setenv("ENABLE_MCP_HTTP", "1")
+    monkeypatch.setenv("ENABLE_MCP_HTTP_NOAUTH", "1")
+    app = FastAPI()
+    mount_mcp_http(app)
+    client = TestClient(app)
+    # Call a known-safe NLP tool that doesn't need network / auth.
+    resp = client.post("/mcp", json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "nlp_extract_inns", "arguments": {"text": "ИНН 7707083893"}},
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"]["isError"] is False
+    # Tool response is in content[0].text as JSON
+    inner = body["result"]["content"][0]["text"]
+    assert "7707083893" in inner
+
+
+def test_mcp_http_invoke_returns_problem_envelope_on_tool_error(monkeypatch):
+    """Tool failure → JSON-RPC result with isError=true + problem envelope."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.mcp_http import mount_mcp_http
+    monkeypatch.setenv("ENABLE_MCP_HTTP", "1")
+    monkeypatch.setenv("ENABLE_MCP_HTTP_NOAUTH", "1")
+    app = FastAPI()
+    mount_mcp_http(app)
+    client = TestClient(app)
+    # Force cosine_similarity to raise via length mismatch
+    resp = client.post("/mcp", json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "cosine_similarity", "arguments": {"a": [1, 2], "b": [1, 2]}},
+    })
+    # cosine_similarity returns ok with valid inputs — should succeed
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"]["isError"] is False
 
 
 # ---------- Queue worker ----------

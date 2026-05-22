@@ -74,9 +74,29 @@ def mdm_table_get(table: str) -> dict:
 
 
 def mdm_record_upsert(table: str, record_id: str, fields: dict,
-                      external_ids: dict | None = None) -> dict:
+                      external_ids: dict | None = None,
+                      dry_run: bool = False) -> dict:
     """Insert or merge an MDM record by id. external_ids carries marketplace
-    cross-refs (wb_nm, ozon_sku, etc.). Existing fields are merged shallowly."""
+    cross-refs (wb_nm, ozon_sku, etc.). Existing fields are merged shallowly.
+
+    `dry_run=True` returns a preview showing whether the action would be
+    `created` vs `updated` and what the merged fields would be, WITHOUT
+    writing to disk."""
+    if dry_run:
+        path = _MDM_DIR / f"{table}.json"
+        records = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        existing = next((r for r in records if r.get("id") == record_id), None)
+        if existing:
+            merged = {**existing.get("fields", {}), **fields}
+            ext_merged = {**(existing.get("external_ids") or {}), **(external_ids or {})}
+            return {"ok": True, "dry_run": True, "executed": False,
+                    "plan": {"action": "updated", "id": record_id,
+                             "merged_fields": merged, "external_ids": ext_merged},
+                    "_meta": {"native_preview": True}}
+        return {"ok": True, "dry_run": True, "executed": False,
+                "plan": {"action": "created", "id": record_id,
+                         "fields": fields, "external_ids": external_ids or {}},
+                "_meta": {"native_preview": True}}
     path = _MDM_DIR / f"{table}.json"
     records = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
     rec = next((r for r in records if r.get("id") == record_id), None)
@@ -109,12 +129,23 @@ def mdm_resolve(table: str, external_key: str, external_value: str) -> dict:
     return {"ok": True, "data": {"found": False}}
 
 
-def mdm_delete(table: str, record_id: str) -> dict:
-    """Remove a record by id."""
+def mdm_delete(table: str, record_id: str, dry_run: bool = False) -> dict:
+    """Remove a record by id. NOT REVERSIBLE — `dry_run=True` returns the
+    record that would be deleted without touching disk."""
     path = _MDM_DIR / f"{table}.json"
     if not path.exists():
         return {"ok": False, "error": f"no table {table!r}"}
     records = json.loads(path.read_text(encoding="utf-8"))
+    if dry_run:
+        target = next((r for r in records if r.get("id") == record_id), None)
+        if target is None:
+            return {"ok": True, "dry_run": True, "executed": False,
+                    "plan": {"would_delete": None, "note": "id not found — delete would be a no-op"},
+                    "_meta": {"native_preview": True}}
+        return {"ok": True, "dry_run": True, "executed": False,
+                "plan": {"would_delete": target,
+                         "reversibility": "NOT REVERSIBLE — record removed from .json file. Restore manually from a backup."},
+                "_meta": {"native_preview": True}}
     n_before = len(records)
     records = [r for r in records if r.get("id") != record_id]
     if len(records) == n_before:
@@ -151,7 +182,7 @@ def approval_request(action: str, args: dict,
 
 
 def approval_decide(approval_id: str, status: str, decided_by: str = "user",
-                    note: str | None = None) -> dict:
+                    note: str | None = None, dry_run: bool = False) -> dict:
     """Approve or deny a pending request. status: approved | denied. Refuses
     if the LATEST state of the approval is not pending (no overturning
     decisions after the fact)."""
@@ -165,6 +196,12 @@ def approval_decide(approval_id: str, status: str, decided_by: str = "user",
     if latest["status"] != "pending":
         return {"ok": False, "error": f"already {latest['status']!r}"}
     target = matching[0]  # for the original args/action context
+    if dry_run:
+        return {"ok": True, "dry_run": True, "executed": False,
+                "plan": {"would_set_status": status, "approval_id": approval_id,
+                         "current_status": "pending", "action": target.get("action"),
+                         "decided_by": decided_by},
+                "_meta": {"native_preview": True}}
     decision = {
         **target,
         "status": status,
@@ -384,11 +421,16 @@ def skill_list(tag: str | None = None) -> dict:
     return {"ok": True, "data": {"skills": items, "count": len(items)}}
 
 
-def skill_remove(name: str) -> dict:
-    """Remove a skill from the registry."""
+def skill_remove(name: str, dry_run: bool = False) -> dict:
+    """Remove a skill from the registry. `dry_run=True` previews without
+    writing the tombstone."""
     records = _read_jsonl(_SKILLS_PATH)
     if not any(r.get("name") == name for r in records):
         return {"ok": False, "error": f"skill {name!r} not found"}
+    if dry_run:
+        return {"ok": True, "dry_run": True, "executed": False,
+                "plan": {"would_remove": name},
+                "_meta": {"native_preview": True}}
     _append_jsonl(_SKILLS_PATH, {"name": name, "removed_at": _now_iso(), "tombstone": True})
     return {"ok": True, "data": {"removed": name}}
 

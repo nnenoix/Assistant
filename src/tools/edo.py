@@ -160,3 +160,48 @@ def diadoc_get_event(api_key: str, auth_token: str, box_id: str, message_id: str
         f"{_DIADOC_BASE}/V3/GetEvent?boxId={box_id}&messageId={message_id}",
         headers={"Authorization": f"DiadocAuth ddauth_api_client_id={api_key},ddauth_token={auth_token}"},
     )
+
+
+def diadoc_sign_xml_skeleton(xml_bytes: bytes, cert_path: str,
+                             pin: str | None = None) -> dict:
+    """SCAFFOLD — outbound document signing for Контур.Диадок.
+
+    Реальный поток в России (ФЗ-63 + Приказ ФНС): подпись через CryptoPro CSP
+    либо OpenSSL+GOST engine. Получатель: CAdES-BES (XMLDSig with GOST 2012).
+    Этот скелет:
+      - Принимает байты XML + путь к сертификату + PIN
+      - Возвращает {ok, signed_xml | error, signature_format}
+      - При установленном `pycades` (CryptoPro Python binding) — реально подписывает
+      - Без `pycades` возвращает структурированный fix_hint
+
+    Для PROD реализации нужен установленный CryptoPro CSP + лицензия на
+    GOST-движок и Python обёртка `pycades` (или вызов capicom.exe через
+    subprocess). Здесь — каркас для следующего инкремента."""
+    try:
+        import pycades  # type: ignore
+    except ImportError:
+        return {
+            "ok": False, "error": "pycades not installed",
+            "fix_hint": (
+                "Install CryptoPro CSP first (Windows: CSP installer + ГОСТ-провайдер; "
+                "Linux: cprocsp-rdr-gui + cprocsp-curl). Then `pip install pycades`."
+            ),
+            "signature_format": "CAdES-BES (XMLDSig GOST 2012)",
+            "_meta": {"native_preview": False, "scaffold": True},
+        }
+    try:
+        # Real signing happens here in production. The pycades API is:
+        #   store = pycades.Store(); store.Open(...)
+        #   cert = store.Certificates.Find(...)
+        #   signer = pycades.Signer(); signer.Certificate = cert
+        #   signed_data = pycades.SignedData(); signed_data.Content = xml_bytes.decode("utf-8")
+        #   sig = signed_data.SignCades(signer, pycades.CADESCOM_CADES_BES, True)
+        # Returning a placeholder so the scaffold compiles.
+        return {
+            "ok": False,
+            "error": "pycades available but signing flow not yet implemented",
+            "fix_hint": "Implement CAdES-BES signing in src/tools/edo.py:diadoc_sign_xml_skeleton.",
+            "_meta": {"scaffold": True, "next_step": "cades_bes_impl"},
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "_meta": {}}

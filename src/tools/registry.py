@@ -2143,8 +2143,8 @@ TOOLS = [
         "yamarket_orders_list",
         yamarket.orders_list,
         "drive.read",
-        "Orders for a campaign. Dates DD-MM-YYYY (Yandex quirk). status: PROCESSING / DELIVERY / DELIVERED / CANCELLED / PICKUP.",
-        {"type": "object", "properties": {"api_key": {"type": "string"}, "campaign_id": {"type": "integer"}, "from_date": {"type": "string"}, "to_date": {"type": "string"}, "page": {"type": "integer", "default": 1}, "page_size": {"type": "integer", "default": 50}, "status": {"type": "string"}}, "required": ["api_key", "campaign_id", "from_date", "to_date"]},
+        "Orders for a campaign. Dates DD-MM-YYYY (Yandex quirk). status: PROCESSING / DELIVERY / DELIVERED / CANCELLED / PICKUP. `response_format='concise'` trims each order to id+status+date+total.",
+        {"type": "object", "properties": {"api_key": {"type": "string"}, "campaign_id": {"type": "integer"}, "from_date": {"type": "string"}, "to_date": {"type": "string"}, "page": {"type": "integer", "default": 1}, "page_size": {"type": "integer", "default": 50}, "status": {"type": "string"}, "response_format": {"type": "string", "enum": ["concise", "detailed"], "default": "concise"}}, "required": ["api_key", "campaign_id", "from_date", "to_date"]},
     ),
     _tool(
         "yamarket_order_get",
@@ -2316,8 +2316,8 @@ TOOLS = [
           "МС юр.лица.",
           {"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]}),
     _tool("moysklad_customerorders_list", moysklad.customerorders_list, "drive.read",
-          "МС заказы покупателей. moment_from/to format `2026-05-01 00:00:00`.",
-          {"type": "object", "properties": {"token": {"type": "string"}, "limit": {"type": "integer", "default": 1000}, "offset": {"type": "integer", "default": 0}, "moment_from": {"type": "string"}, "moment_to": {"type": "string"}}, "required": ["token"]}),
+          "МС заказы покупателей. moment_from/to format `2026-05-01 00:00:00`. `response_format='concise'` trims to id+moment+sum+agent only.",
+          {"type": "object", "properties": {"token": {"type": "string"}, "limit": {"type": "integer", "default": 1000}, "offset": {"type": "integer", "default": 0}, "moment_from": {"type": "string"}, "moment_to": {"type": "string"}, "response_format": {"type": "string", "enum": ["concise", "detailed"], "default": "concise"}}, "required": ["token"]}),
     _tool("moysklad_demands_list", moysklad.demands_list, "drive.read",
           "МС отгрузки (revenue recognition events).",
           {"type": "object", "properties": {"token": {"type": "string"}, "limit": {"type": "integer", "default": 1000}, "offset": {"type": "integer", "default": 0}, "moment_from": {"type": "string"}}, "required": ["token"]}),
@@ -4211,6 +4211,18 @@ def _wrap_for_sdk(spec):
 
     @tool(name, description, input_schema, annotations=annotations)
     async def wrapped(args):
+        # Optional OTel span — no-op when opentelemetry-api isn't installed.
+        # Each tool call becomes a span with name `tool.<name>` so traces
+        # show end-to-end agent → tool → upstream API behaviour in Langfuse
+        # / Phoenix / Jaeger.
+        _otel_span = None
+        try:
+            from opentelemetry import trace as _otel_trace
+            _otel_span = _otel_trace.get_tracer("workspace_agent").start_as_current_span(f"tool.{name}")
+            _otel_span.__enter__()
+        except Exception:
+            _otel_span = None
+        _started = asyncio.get_event_loop().time()
         # Dry-run gate. If the tool's destructive AND the caller asked for a
         # preview, either pass through (native impl) or return a stub
         # envelope. Stub means: "your call was accepted, here's what would
@@ -4308,6 +4320,12 @@ def _wrap_for_sdk(spec):
                 "content": [{"type": "text", "text": payload}],
                 "is_error": True,
             }
+        finally:
+            if _otel_span is not None:
+                try:
+                    _otel_span.__exit__(None, None, None)
+                except Exception:
+                    pass
     return wrapped
 
 

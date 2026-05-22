@@ -118,8 +118,14 @@ def organizations_list(token: str) -> dict:
 
 def customerorders_list(token: str, limit: int = 1000, offset: int = 0,
                         moment_from: str | None = None,
-                        moment_to: str | None = None) -> dict:
-    """Заказы покупателей. moment_from/to in МС format: `2026-05-01 00:00:00`."""
+                        moment_to: str | None = None,
+                        response_format: str = "concise") -> dict:
+    """Заказы покупателей. moment_from/to in МС format: `2026-05-01 00:00:00`.
+
+    `response_format='concise'` (default): keep id, moment, sum, agent name
+    only — drops positions array (which can be huge per order)."""
+    if response_format not in {"concise", "detailed"}:
+        raise ValueError(f"response_format must be 'concise' or 'detailed', got {response_format!r}")
     params: dict = {"limit": limit, "offset": offset}
     filters: list[str] = []
     if moment_from:
@@ -128,7 +134,15 @@ def customerorders_list(token: str, limit: int = 1000, offset: int = 0,
         filters.append(f"moment<={moment_to}")
     if filters:
         params["filter"] = ";".join(filters)
-    return _call("/entity/customerorder", token, params=params)
+    out = _call("/entity/customerorder", token, params=params)
+    if out.get("ok") and response_format == "concise":
+        rows = (out.get("data") or {}).get("rows") or []
+        out["data"]["rows"] = [
+            {"id": r.get("id"), "moment": r.get("moment"), "sum": r.get("sum"),
+             "agent_meta": (r.get("agent") or {}).get("meta", {}).get("href")}
+            for r in rows
+        ]
+    return out
 
 
 def demands_list(token: str, limit: int = 1000, offset: int = 0,

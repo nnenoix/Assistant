@@ -103,6 +103,39 @@ def yookassa_receipts_list(shop_id: str, secret: str,
     return _yk_call("/receipts", shop_id, secret, params=params)
 
 
+def yookassa_verify_webhook(raw_body: str, signature_header: str,
+                            cert_pem: str | None = None) -> dict:
+    """Verify a ЮKassa webhook callback. ЮKassa uses RSA over the raw body
+    (not HMAC). Pass the `cert_pem` content (ЮKassa publishes a rotating
+    cert chain — caller fetches from https://yookassa.ru/files/ssl/...).
+    Returns {ok, valid, error?}.
+
+    Lazy-imports `cryptography` — returns a hint if not installed."""
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding as _padding
+        from cryptography.x509 import load_pem_x509_certificate
+    except ImportError:
+        return {"ok": False, "error": "cryptography not installed",
+                "fix_hint": "pip install cryptography"}
+    if not cert_pem:
+        return {"ok": False, "error": "cert_pem required for cert-based verification"}
+    try:
+        import base64
+        cert = load_pem_x509_certificate(cert_pem.encode("utf-8"))
+        pubkey = cert.public_key()
+        sig_bytes = base64.b64decode(signature_header)
+        pubkey.verify(
+            sig_bytes,
+            raw_body.encode("utf-8"),
+            _padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+        return {"ok": True, "data": {"valid": True}}
+    except Exception as e:
+        return {"ok": True, "data": {"valid": False, "error": str(e)[:200]}}
+
+
 # ============================================================
 # Тинькофф Acquiring (E2C)
 # ============================================================
