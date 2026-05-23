@@ -247,6 +247,21 @@ TOOLS = [
         {"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]},
     ),
     _tool(
+        "drive_resolve_link",
+        drive.resolve_link,
+        "drive.read",
+        "**ALWAYS CALL THIS FIRST when a Drive/Docs/Sheets/Slides URL appears in user message.** Parses the URL and probes EVERY registered OAuth account to find one that has access. Returns {accessible_via: [aliases], recommended_account, metadata, parsed:{kind,id}} on success, or {error_kind, suggestion:'add_account', hint} when nobody sees it. Use the returned `recommended_account` for all subsequent drive_*/sheets_*/docs_* calls on that file. Saves you from guessing which alias works and from 404-spam loops.",
+        {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Drive/Docs/Sheets/Slides share-link from the user."},
+                "accounts": {"type": "array", "items": {"type": "string"}, "description": "Optional explicit list of aliases to probe. Default: every registered account."},
+            },
+            "required": ["url"],
+        },
+        category="drive",
+    ),
+    _tool(
         "drive_list_shared",
         drive.list_shared_with_me,
         "drive.read",

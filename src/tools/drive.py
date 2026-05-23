@@ -713,3 +713,136 @@ def empty_trash(account: str = DEFAULT_ACCOUNT) -> dict:
     """Permanently delete EVERYTHING in the trash. Irreversible — use with care."""
     _service(account).files().emptyTrash().execute()
     return {"ok": True, "warning": "trash permanently emptied"}
+
+
+def resolve_link(url: str, accounts: list[str] | None = None) -> dict:
+    """Resolve a Drive / Docs / Sheets / Slides share-link by probing every
+    OAuth-registered account until one of them can see it.
+
+    This is the answer to "user pasted a link — under which account does it
+    work?". The agent calls this BEFORE running drive_*/sheets_* tools
+    when a URL appears in the conversation, so it picks the right
+    `account=` alias automatically.
+
+    Returns:
+        when at least one account has access:
+        {
+            ok: True,
+            parsed: {kind, id},          # what the URL pointed at
+            accessible_via: ["egor", "elena"],  # aliases that see it
+            not_seen_by: ["work"],       # aliases that got 404 / 403
+            recommended_account: "egor", # the first one that works
+            metadata: {name, mimeType, webViewLink, …}  # from the recommended acct
+            _meta: {probed: N, took_ms}
+        }
+
+        when nobody has access:
+        {
+            ok: False,
+            parsed: {kind, id},
+            accessible_via: [],
+            not_seen_by: ["egor", "work"],
+            error_kind: "permission",  # or "not_found" / "auth_scope"
+            suggestion: "add_account",  # call POST /api/accounts/add_auto
+            hint: "Sign in with the Google account that has access to this link.",
+            _meta: {probed: N, took_ms}
+        }
+
+    Use:
+        out = drive.resolve_link("https://drive.google.com/drive/folders/...")
+        if out["ok"]:
+            drive.list_files(folder_id=out["parsed"]["id"],
+                             account=out["recommended_account"])
+    """
+    from src.tools.browser import _parse_drive_url  # already battle-tested
+    from src import auth
+    from src.tools._errors import _classify_exception
+    import time
+
+    t0 = time.perf_counter()
+    parsed = _parse_drive_url(url)
+    if parsed["kind"] == "unknown" or not parsed["id"]:
+        return {
+            "ok": False,
+            "parsed": parsed,
+            "error_kind": "bad_input",
+            "error": "URL doesn't look like a Drive/Docs/Sheets/Slides link",
+            "_meta": {"probed": 0, "took_ms": 0},
+        }
+
+    candidates = accounts if accounts is not None else auth.list_accounts()
+    if not candidates:
+        return {
+            "ok": False,
+            "parsed": parsed,
+            "accessible_via": [],
+            "not_seen_by": [],
+            "error_kind": "auth_scope",
+            "suggestion": "add_account",
+            "hint": (
+                "No Google accounts are registered yet. Sign in via "
+                "POST /api/accounts/add_auto to add the first one."
+            ),
+            "_meta": {"probed": 0, "took_ms": 0},
+        }
+
+    accessible: list[str] = []
+    blocked: list[dict] = []
+    found_meta: dict | None = None
+    found_account: str | None = None
+
+    for alias in candidates:
+        try:
+            meta = get_metadata(parsed["id"], account=alias)
+            accessible.append(alias)
+            if found_meta is None:
+                found_meta = meta
+                found_account = alias
+        except Exception as e:
+            kind, status = _classify_exception(e)
+            blocked.append({"alias": alias, "error_kind": kind,
+                            "http_status": status})
+
+    took_ms = round((time.perf_counter() - t0) * 1000, 1)
+    if accessible:
+        return {
+            "ok": True,
+            "parsed": parsed,
+            "accessible_via": accessible,
+            "not_seen_by": [b["alias"] for b in blocked],
+            "recommended_account": found_account,
+            "metadata": found_meta,
+            "_meta": {"probed": len(candidates), "took_ms": took_ms},
+        }
+
+    # Nobody saw it — figure out the dominant failure kind so we can
+    # surface the right hint.
+    kinds = [b["error_kind"] for b in blocked]
+    dominant = "not_found"
+    if "permission" in kinds:
+        dominant = "permission"
+    elif "auth_scope" in kinds:
+        dominant = "auth_scope"
+    hints = {
+        "not_found": "None of the registered accounts can see this link. "
+                     "Either the link is wrong, OR it's shared with an account "
+                     "you haven't added yet — use POST /api/accounts/add_auto "
+                     "to sign in with the right Google account.",
+        "permission": "The link exists, but all your registered accounts are "
+                      "denied access. Add the account that has access via "
+                      "POST /api/accounts/add_auto, or ask the owner to share "
+                      "with one of: " + ", ".join(candidates),
+        "auth_scope": "One or more accounts are missing the Drive scope. "
+                      "Re-run OAuth for them via auth_add_account_incremental.",
+    }
+    return {
+        "ok": False,
+        "parsed": parsed,
+        "accessible_via": [],
+        "not_seen_by": [b["alias"] for b in blocked],
+        "blocked_detail": blocked,
+        "error_kind": dominant,
+        "suggestion": "add_account",
+        "hint": hints[dominant],
+        "_meta": {"probed": len(candidates), "took_ms": took_ms},
+    }

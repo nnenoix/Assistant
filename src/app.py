@@ -280,6 +280,146 @@ async def setup_start_oauth_api():
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
 
 
+# ============================================================
+# Onboarding state — single endpoint the UI polls to drive the wizard
+# ============================================================
+
+@app.get("/api/onboarding/state")
+async def onboarding_state_api():
+    """One-stop status for the welcome wizard the .exe shows on first
+    run. Drives a 3-step UI:
+
+      step 1: install_claude  — Claude CLI on PATH + authenticated
+      step 2: google_signin   — at least one Google account registered
+      step 3: ready           — green-light, hand off to the chat UI
+
+    Returns:
+        {
+            steps: [
+                {id: "install_claude", title: "...", done: bool, action: "..."},
+                {id: "google_signin",  title: "...", done: bool, action: "..."},
+            ],
+            complete: bool,        # all steps done
+            current_step: str,     # id of the first not-done step
+            accounts: [{alias, email}],   # already-connected accounts
+        }
+
+    The frontend just renders steps in order, lights up the "done"
+    ones, and calls the corresponding action endpoint for the
+    current_step (`/api/setup/install_claude`, `/api/setup/start_oauth`,
+    etc.).
+    """
+    from src import setup
+
+    setup_status = await asyncio.to_thread(setup.check_setup_status, True)
+    try:
+        accounts = await asyncio.to_thread(auth.list_accounts_with_identity)
+        accounts_list = accounts.get("accounts", []) if isinstance(accounts, dict) else []
+    except Exception:
+        accounts_list = []
+
+    claude_done = bool(setup_status.get("claude_installed") and
+                       setup_status.get("claude_authenticated"))
+    google_done = len(accounts_list) > 0
+
+    steps = [
+        {
+            "id": "install_claude",
+            "title": "Установить Claude Code",
+            "description": "Локальный AI-движок, который запускает агента.",
+            "done": claude_done,
+            "action_endpoint": "/api/setup/install_claude",
+        },
+        {
+            "id": "google_signin",
+            "title": "Войти в Google",
+            "description": "Один клик — авторизуем доступ к Drive / Sheets / Gmail / Calendar.",
+            "done": google_done,
+            "action_endpoint": "/api/setup/start_oauth",
+        },
+    ]
+    complete = all(s["done"] for s in steps)
+    current_step = next((s["id"] for s in steps if not s["done"]), "ready")
+    return {
+        "steps": steps,
+        "complete": complete,
+        "current_step": current_step,
+        "accounts": accounts_list,
+    }
+
+
+# ============================================================
+# Auto-update — UI polls /check, asks to apply via /apply
+# ============================================================
+
+@app.get("/api/updates/check")
+async def updates_check_api():
+    """Check whether a newer build is available.
+
+    Manifest URL comes from env `UPDATE_MANIFEST_URL` — set this when
+    you publish a GitHub Release with a manifest.json next to the .exe.
+    When unset, returns `{ok: True, update_available: False, reason:
+    "manifest URL not configured"}` so the UI can hide the update
+    banner instead of crashing.
+    """
+    import os
+    from src import updater
+    manifest_url = os.environ.get("UPDATE_MANIFEST_URL", "").strip()
+    if not manifest_url:
+        return {
+            "ok": True,
+            "update_available": False,
+            "current_version": updater.get_current_version(),
+            "_meta": {"reason": "manifest URL not configured (UPDATE_MANIFEST_URL env)"},
+        }
+    current = updater.get_current_version()
+    return await asyncio.to_thread(updater.check_for_updates, current, manifest_url)
+
+
+class ApplyUpdateRequest(BaseModel):
+    download_url: str
+    expected_sha256: str | None = None
+
+
+@app.post("/api/updates/apply")
+async def updates_apply_api(req: ApplyUpdateRequest):
+    """Download the new binary + swap it into place + ready to relaunch.
+
+    Returns:
+        {ok, applied?, backup_path?, current_path?, error?, error_kind?}
+
+    The UI should:
+      1. Show a "downloading..." indicator while this runs.
+      2. On `ok: True`, prompt the user "Restart to finish update?"
+      3. On user confirmation, call `/api/updates/relaunch` (separate
+         endpoint, not auto — so a half-applied update doesn't yank
+         the rug out from under an active conversation).
+    """
+    import tempfile
+    from pathlib import Path
+    from src import updater
+
+    tmp_dir = Path(tempfile.gettempdir()) / "workspace-agent-update"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    new_path = tmp_dir / "agent-new.exe"
+
+    # Download with SHA-256 verify
+    dl = await asyncio.to_thread(
+        updater.download_update,
+        req.download_url, str(new_path),
+        64 * 1024, 600,  # 10-min cap for big binaries
+        req.expected_sha256,
+    )
+    if not dl.get("ok"):
+        return dl
+
+    # Swap into place (DON'T relaunch — UI does that after user confirms)
+    apply = await asyncio.to_thread(
+        updater.apply_update, str(new_path), None, False
+    )
+    return apply
+
+
 @app.get("/api/alerts")
 async def list_alerts_api(unread_only: bool = False, limit: int = 50):
     """Return queued failure alerts. UI polls this every 30s to show the
