@@ -54,6 +54,23 @@ def _find_client_secret() -> Path | None:
 
 CLIENT_SECRET_PATH = _find_client_secret()
 
+
+# Auto-update channel. UI's UpdateBanner polls /api/updates/check, which
+# reads this env var. Bundling a default here means a user-installed .exe
+# checks the right place WITHOUT setup. Override at runtime via env var
+# or .env file next to the .exe.
+#
+# To enable auto-update for your distribution: replace `<OWNER>/<REPO>` with
+# your GitHub repo. The release.yml workflow publishes manifest.json to
+# `releases/latest/download/` on every `v*` tag — that's the URL pattern below.
+import os as _os
+_os.environ.setdefault(
+    "UPDATE_MANIFEST_URL",
+    # Leave empty by default — UI hides the banner when unset. Set this
+    # via spec / .env / packaging step when distributing.
+    "",
+)
+
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",

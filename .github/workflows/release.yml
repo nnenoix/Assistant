@@ -1,0 +1,108 @@
+name: release
+
+# Fires on a version tag like `v0.2.0`. Builds the Windows .exe via
+# PyInstaller, generates a manifest.json (version + sha256 + download_url),
+# and uploads BOTH as assets on the GitHub Release.
+#
+# Operator workflow:
+#   1. Bump `version` in pyproject.toml.
+#   2. git tag v0.2.0 && git push origin v0.2.0
+#   3. GitHub draws the release; this workflow attaches the .exe + manifest.
+#   4. Set UPDATE_MANIFEST_URL on existing .exe installs to
+#      https://github.com/<owner>/<repo>/releases/latest/download/manifest.json
+#      → all installed .exe see the new build via /api/updates/check.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      # GITHUB_TOKEN needs `contents: write` to push the assets onto the Release.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run unit tests (sanity before shipping)
+        run: |
+          uv run pytest tests/ -q `
+            --ignore=tests/integration `
+            --deselect "tests/test_policy.py::test_missing_file_creates_empty_policy"
+
+      - name: Read version from tag
+        id: ver
+        shell: bash
+        run: |
+          # ${{ github.ref_name }} = "v0.2.0"; strip leading v
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Build .exe with PyInstaller
+        run: uv run pyinstaller workspace_agent.spec --clean --noconfirm
+
+      - name: Locate built .exe
+        id: artifact
+        shell: bash
+        run: |
+          # PyInstaller deposits the binary under dist/. The spec names it
+          # workspace_agent.exe (one-file mode); resolve and verify.
+          EXE_PATH=$(find dist -maxdepth 2 -name "*.exe" | head -1)
+          if [ -z "$EXE_PATH" ]; then
+            echo "::error::No .exe produced under dist/"
+            exit 1
+          fi
+          echo "exe_path=$EXE_PATH" >> "$GITHUB_OUTPUT"
+          echo "exe_name=$(basename "$EXE_PATH")" >> "$GITHUB_OUTPUT"
+          echo "Built: $EXE_PATH"
+
+      - name: Compute SHA-256
+        id: hash
+        shell: bash
+        run: |
+          SHA=$(sha256sum "${{ steps.artifact.outputs.exe_path }}" | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "SHA-256: $SHA"
+
+      - name: Build manifest.json
+        shell: bash
+        run: |
+          cat > manifest.json <<EOF
+          {
+              "latest_version": "${{ steps.ver.outputs.version }}",
+              "download_url": "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.artifact.outputs.exe_name }}",
+              "sha256": "${{ steps.hash.outputs.sha256 }}",
+              "release_notes_url": "https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+          }
+          EOF
+          cat manifest.json
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.artifact.outputs.exe_path }}
+            manifest.json
+          # Keep the auto-generated body GitHub creates; don't overwrite
+          # release notes here so the operator can edit them via the UI
+          # before publishing.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

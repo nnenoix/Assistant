@@ -2424,9 +2424,119 @@ function App() {
         `}
       </div>
       <${AlertsBanner} alerts=${alerts} onDiscuss=${askAboutAlert} onDismiss=${dismissAlert} onClearAll=${dismissAllAlerts} />
+      <${UpdateBanner} />
       <${Composer} disabled=${inputDisabled} onSend=${sendMessage} />
       <${ApprovalModal} req=${currentApproval} onResolve=${onApprovalResolve} />
       <${AccountsModal} open=${accountsOpen} onClose=${() => { setAccountsOpen(false); fetch("/api/accounts").then(r => r.json()).then(j => setAccounts(j.accounts || [])).catch(() => {}); }} />
+    </div>
+  `;
+}
+
+/* ── update banner — polls /api/updates/check, shows when newer build available ─── */
+function UpdateBanner() {
+  // States: 'idle' (no update / not configured), 'available', 'downloading',
+  // 'ready_to_restart', 'error', 'dismissed'.
+  const [state, setState] = useState("idle");
+  const [info, setInfo] = useState(null);  // {current_version, latest_version, download_url, release_notes}
+  const [err, setErr] = useState(null);
+
+  // Poll once on mount + every 6h. Update channel isn't time-critical;
+  // long interval keeps the banner from re-appearing if the user dismissed it.
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const r = await fetch("/api/updates/check").then(r => r.json());
+        if (cancelled) return;
+        if (r.ok && r.update_available) {
+          setInfo(r);
+          setState(s => (s === "dismissed" || s === "downloading" || s === "ready_to_restart") ? s : "available");
+        }
+      } catch {}
+    };
+    check();
+    const id = setInterval(check, 6 * 60 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const onUpdateNow = async () => {
+    if (!info?.download_url) return;
+    setState("downloading"); setErr(null);
+    try {
+      const r = await fetch("/api/updates/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          download_url: info.download_url,
+          expected_sha256: info.sha256 || null,
+        }),
+      }).then(r => r.json());
+      if (r.ok && r.data?.applied) {
+        setState("ready_to_restart");
+      } else {
+        setState("error");
+        setErr(r.error || "Не удалось применить обновление");
+      }
+    } catch (e) {
+      setState("error");
+      setErr(String(e));
+    }
+  };
+
+  const onDismiss = () => setState("dismissed");
+
+  if (state === "idle" || state === "dismissed") return null;
+
+  if (state === "ready_to_restart") {
+    return html`
+      <div class="alerts-wrap">
+        <div class="alerts-banner severity-error" style="background: var(--ok-soft); color: var(--ok-text);">
+          <div class="alerts-banner-head">
+            <${Icon} name="check" />
+            Обновление установлено (v${info?.latest_version}). Перезапустите приложение, чтобы оно применилось.
+            <button class="clear" onClick=${onDismiss}>Скрыть</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (state === "error") {
+    return html`
+      <div class="alerts-wrap">
+        <div class="alerts-banner severity-error">
+          <div class="alerts-banner-head">
+            <${Icon} name="alert" />
+            Не удалось обновить: ${err}
+            <button class="clear" onClick=${onDismiss}>Скрыть</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // available | downloading
+  return html`
+    <div class="alerts-wrap">
+      <div class="alerts-banner">
+        <div class="alerts-banner-head">
+          <${Icon} name="info" />
+          Доступна новая версия: <code>${info?.current_version || "?"}</code> → <code>${info?.latest_version}</code>
+          <button class="clear" onClick=${onDismiss}>Позже</button>
+        </div>
+        ${info?.release_notes && html`
+          <div class="alert-meta" style="padding: 0 12px 8px;">
+            ${(info.release_notes || "").slice(0, 200)}${info.release_notes?.length > 200 ? "…" : ""}
+          </div>
+        `}
+        <div class="alert-row">
+          <div class="actions">
+            <button class="primary" disabled=${state === "downloading"} onClick=${onUpdateNow}>
+              ${state === "downloading" ? "Загружаю…" : "Обновить сейчас"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 }
