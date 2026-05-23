@@ -160,7 +160,13 @@ migrate to Postgres for multi-instance / multi-tenant deployment:
 - ~~`metrics_path: /metrics` on the FastAPI app~~ — **DONE.** Zero-dep
   Prometheus text emission via `src/metrics.py`; `_wrap_for_sdk`
   populates per-tool call counters + latency histogram.
-- Real OTel instrumentation in tool wrappers (currently only `service.trace_span_log` jsonl-stub)
+- ~~Real OTel instrumentation in tool wrappers~~ — **DONE.** Each tool
+  call is now a span with attributes `tool.name`, `tool.tenant_id`,
+  `tool.dry_run`, `tool.idempotency_key_present`, `tool.status`,
+  `tool.latency_ms`, `tool.error_kind`, `tool.quota_paced_ms`. On
+  exception: `record_exception(e)` + `set_status(ERROR)`. No-op when
+  `opentelemetry-api` isn't installed.
+  (`service.trace_span_log` JSONL stub kept for offline replay.)
 - ЮKassa cert rotation automation (cert is published, need polling)
 - LibreChat OIDC SSO integration (currently uses service-account Bearer token)
 - Helm chart / Kubernetes manifests for non-Docker deploys

@@ -26,15 +26,24 @@ from src.tools import (
 
 # Optional OpenTelemetry trace API — falls back to `None` when the package
 # isn't installed so `_wrap_for_sdk`'s hot path stays lazy-import free.
+# Status/StatusCode also imported at module top so the exception path
+# doesn't pay an import cost on every failure.
 try:
     from opentelemetry import trace as _otel_trace  # type: ignore
+    from opentelemetry.trace import Status as _OtelStatus, StatusCode as _OtelStatusCode  # type: ignore
 except Exception:  # pragma: no cover — opentelemetry not installed
     _otel_trace = None
+    _OtelStatus = None
+    _OtelStatusCode = None
 
 # Prometheus-format metrics. Always available — the module has zero
 # external dependencies. Hooked at the tool wrapper's finally block so
 # every invocation increments call counters and the latency histogram.
 from src import metrics as _metrics
+
+# Tenant ContextVar accessor — read once per wrapped call to stamp the
+# OTel span. Module-level import keeps the hot path lazy-import free.
+from src.tenancy import current_tenant_id as _current_tenant_id
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -4228,12 +4237,24 @@ def _wrap_for_sdk(spec):
         # Each tool call becomes a span with name `tool.<name>` so traces
         # show end-to-end agent → tool → upstream API behaviour in Langfuse
         # / Phoenix / Jaeger.
+        #
+        # `start_as_current_span` returns a context manager; `__enter__`
+        # yields the Span itself (mutable — set_attribute, record_exception,
+        # set_status). We keep both: `_otel_cm` to close on exit, `_otel_span`
+        # to populate as the call progresses.
+        _otel_cm = None
         _otel_span = None
         if _otel_trace is not None:
             try:
-                _otel_span = _otel_trace.get_tracer("workspace_agent").start_as_current_span(f"tool.{name}")
-                _otel_span.__enter__()
+                _otel_cm = _otel_trace.get_tracer("workspace_agent").start_as_current_span(f"tool.{name}")
+                _otel_span = _otel_cm.__enter__()
+                _otel_span.set_attribute("tool.name", name)
+                try:
+                    _otel_span.set_attribute("tool.tenant_id", _current_tenant_id())
+                except Exception:
+                    pass
             except Exception:
+                _otel_cm = None
                 _otel_span = None
         _started = asyncio.get_event_loop().time()
         # Dry-run gate. If the tool's destructive AND the caller asked for a
@@ -4248,28 +4269,38 @@ def _wrap_for_sdk(spec):
             else:
                 # No native impl — strip from args and stub here.
                 dry_run_requested = bool(args.pop("dry_run", False))
-                if dry_run_requested:
-                    stub = {
-                        "dry_run": True,
-                        "executed": False,
-                        "tool": name,
-                        "args": args,
-                        "plan": {
-                            "would_call": name,
-                            "with_args": args,
-                            "note": (
-                                f"`{name}` does not yet implement a native dry_run "
-                                "preview. Stub returned: nothing was executed. "
-                                "Re-call without `dry_run` to perform the operation."
-                            ),
-                        },
-                        "_meta": {"native_preview": False},
-                    }
-                    return {"content": [{"type": "text", "text": json.dumps(stub, ensure_ascii=False)}]}
+        if _otel_span is not None:
+            try:
+                _otel_span.set_attribute("tool.dry_run", bool(dry_run_requested))
+            except Exception:
+                pass
+        if supports_dry_run and not native_dry_run and dry_run_requested:
+            stub = {
+                "dry_run": True,
+                "executed": False,
+                "tool": name,
+                "args": args,
+                "plan": {
+                    "would_call": name,
+                    "with_args": args,
+                    "note": (
+                        f"`{name}` does not yet implement a native dry_run "
+                        "preview. Stub returned: nothing was executed. "
+                        "Re-call without `dry_run` to perform the operation."
+                    ),
+                },
+                "_meta": {"native_preview": False},
+            }
+            return {"content": [{"type": "text", "text": json.dumps(stub, ensure_ascii=False)}]}
 
         # Stripe-style idempotency. Only enabled when (a) the tool was tagged
         # non-idempotent at registration, and (b) the caller supplied a key.
         idempotency_key = args.pop("idempotency_key", None) if supports_idempotency else None
+        if _otel_span is not None:
+            try:
+                _otel_span.set_attribute("tool.idempotency_key_present", bool(idempotency_key))
+            except Exception:
+                pass
         if idempotency_key:
             cached = await asyncio.to_thread(_idempotency.lookup, idempotency_key, name, args)
             if cached.get("hit"):
@@ -4330,22 +4361,39 @@ def _wrap_for_sdk(spec):
         except Exception as e:
             problem = _build_problem(e, name)
             outcome["error_kind"] = (problem.get("_meta") or {}).get("error_kind")
+            if _otel_span is not None:
+                try:
+                    _otel_span.record_exception(e)
+                    if _OtelStatus is not None and _OtelStatusCode is not None:
+                        _otel_span.set_status(_OtelStatus(_OtelStatusCode.ERROR, str(e)[:200]))
+                except Exception:
+                    pass
             payload = json.dumps(problem, ensure_ascii=False)
             return {
                 "content": [{"type": "text", "text": payload}],
                 "is_error": True,
             }
         finally:
+            latency_ms = (asyncio.get_event_loop().time() - _started) * 1000.0
             if _otel_span is not None:
                 try:
-                    _otel_span.__exit__(None, None, None)
+                    _otel_span.set_attribute("tool.status", "ok" if outcome["ok"] else "error")
+                    _otel_span.set_attribute("tool.latency_ms", latency_ms)
+                    if outcome["error_kind"]:
+                        _otel_span.set_attribute("tool.error_kind", outcome["error_kind"])
+                    if paced_ms > 0:
+                        _otel_span.set_attribute("tool.quota_paced_ms", paced_ms)
+                except Exception:
+                    pass
+            if _otel_cm is not None:
+                try:
+                    _otel_cm.__exit__(None, None, None)
                 except Exception:
                     pass
             # Record metrics regardless of outcome. Latency is wall-clock
             # ms from the start of the wrapped call (covers quota pacing
             # + idempotency lookup + the actual tool body).
             try:
-                latency_ms = (asyncio.get_event_loop().time() - _started) * 1000.0
                 _metrics.record_tool_call(
                     name, latency_ms,
                     ok=outcome["ok"], error_kind=outcome["error_kind"],
