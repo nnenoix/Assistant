@@ -70,7 +70,7 @@ _os.environ.setdefault(
     # on every `v*` tag push. Installed .exe instances poll this URL via
     # /api/updates/check and surface a banner when latest_version differs
     # from the bundled version.
-    "https://github.com/nnenoix/Google-work/releases/latest/download/manifest.json",
+    "https://github.com/nnenoix/Assistant/releases/latest/download/manifest.json",
 )
 
 SCOPES = [
