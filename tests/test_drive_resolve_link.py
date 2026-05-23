@@ -175,3 +175,46 @@ def test_system_prompt_has_link_resolve_rule():
     assert re.search(r"\b23a\b", SYSTEM_PROMPT), (
         "Rule 23a (drive link resolution) is missing from SYSTEM_PROMPT"
     )
+
+
+def test_resolve_link_probes_accounts_in_parallel():
+    """Wall-clock regression: 4 fake-slow accounts × 100ms each must
+    finish in ≪ 400ms (serial) — expected ~100-200ms parallel."""
+    import time as _t
+
+    def slow_get_metadata(file_id, account="main"):
+        _t.sleep(0.1)
+        return {"id": file_id, "name": "shared", "mimeType": "x"}
+
+    started = _t.perf_counter()
+    with patch.object(drive, "get_metadata", side_effect=slow_get_metadata), \
+         patch("src.auth.list_accounts", return_value=["a", "b", "c", "d"]):
+        out = drive.resolve_link("https://drive.google.com/drive/folders/F1")
+    elapsed_ms = (_t.perf_counter() - started) * 1000
+
+    assert out["ok"] is True
+    assert len(out["accessible_via"]) == 4
+    assert elapsed_ms < 300, (
+        f"resolve_link took {elapsed_ms:.0f}ms for 4×100ms probes — "
+        f"expected parallel execution"
+    )
+
+
+def test_resolve_link_recommended_account_is_deterministic():
+    """When several accounts see the file and probes finish in any order,
+    `recommended_account` must still be the first one in `candidates`
+    order (not whoever finished first). Otherwise re-runs would pick
+    different aliases."""
+    def fake_get(file_id, account="main"):
+        # Simulate non-uniform timing — last account in list finishes first
+        import time as _t
+        delay = {"a": 0.15, "b": 0.05, "c": 0.10, "d": 0.01}.get(account, 0)
+        _t.sleep(delay)
+        return {"id": file_id, "name": "x", "mimeType": "y"}
+
+    with patch.object(drive, "get_metadata", side_effect=fake_get), \
+         patch("src.auth.list_accounts", return_value=["a", "b", "c", "d"]):
+        out = drive.resolve_link("https://drive.google.com/drive/folders/F1")
+
+    assert out["recommended_account"] == "a"  # first in original list
+    assert out["accessible_via"] == ["a", "b", "c", "d"]  # stable order

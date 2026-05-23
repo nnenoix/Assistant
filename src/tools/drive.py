@@ -786,22 +786,41 @@ def resolve_link(url: str, accounts: list[str] | None = None) -> dict:
             "_meta": {"probed": 0, "took_ms": 0},
         }
 
-    accessible: list[str] = []
-    blocked: list[dict] = []
-    found_meta: dict | None = None
-    found_account: str | None = None
+    # Probe accounts in PARALLEL — serial loop made the agent wait
+    # 4×~150ms (one full RTT per account) before knowing which alias
+    # owns access. ThreadPoolExecutor cuts this to ~150ms total.
+    from concurrent.futures import ThreadPoolExecutor
 
-    for alias in candidates:
+    def _probe(alias: str) -> tuple[str, dict | None, dict | None]:
         try:
-            meta = get_metadata(parsed["id"], account=alias)
-            accessible.append(alias)
-            if found_meta is None:
-                found_meta = meta
-                found_account = alias
+            return alias, get_metadata(parsed["id"], account=alias), None
         except Exception as e:
             kind, status = _classify_exception(e)
-            blocked.append({"alias": alias, "error_kind": kind,
-                            "http_status": status})
+            return alias, None, {"alias": alias, "error_kind": kind,
+                                  "http_status": status}
+
+    accessible: list[str] = []
+    blocked: list[dict] = []
+    per_alias_meta: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(len(candidates), 8),
+                            thread_name_prefix="drive-resolve") as pool:
+        for alias, meta, err in pool.map(_probe, candidates):
+            if meta is not None:
+                accessible.append(alias)
+                per_alias_meta[alias] = meta
+            elif err is not None:
+                blocked.append(err)
+
+    # Pick the first accessible IN ORIGINAL `candidates` ORDER (not the
+    # order futures happened to complete). Makes the "recommended" alias
+    # deterministic across re-runs.
+    found_account: str | None = next(
+        (a for a in candidates if a in per_alias_meta), None
+    )
+    found_meta: dict | None = per_alias_meta.get(found_account) if found_account else None
+    # `accessible` is built in completion order — re-sort to match candidates
+    # order too, so the UI shows aliases in a stable sequence.
+    accessible = [a for a in candidates if a in per_alias_meta]
 
     took_ms = round((time.perf_counter() - t0) * 1000, 1)
     if accessible:
