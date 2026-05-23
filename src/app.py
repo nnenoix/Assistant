@@ -161,18 +161,60 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 _session = AgentSession(policy=Policy.load(ALLOWLIST_PATH))
 
 _run_queues: dict[str, asyncio.Queue] = {}
-_chat_log: chats.ChatLog | None = None  # rolls over on server restart
+_chat_log: chats.ChatLog | None = None  # currently active chat
 
 
-def _ensure_chat_log() -> chats.ChatLog:
+async def _switch_to_chat(chat_id: str | None) -> chats.ChatLog:
+    """Resolve which chat the next message belongs to.
+
+    - `chat_id=None` → start a fresh chat. If a different chat was active
+      before, close the Claude SDK client so the new conversation starts
+      with a clean context.
+    - `chat_id="<existing>"` → load that chat. If it's the SAME one
+      currently active, no-op. If DIFFERENT, close the session so the
+      new client gets a recap injection on its first turn (see _maybe_
+      inject_recap below).
+    """
     global _chat_log
-    if _chat_log is None:
+    if chat_id is None:
+        # Always start fresh — close current session if any
+        if _chat_log is not None:
+            await _session.close()
         _chat_log = chats.ChatLog.start_new()
+        return _chat_log
+    # Continuing an existing chat
+    if _chat_log is not None and _chat_log.data.get("id") == chat_id:
+        # Same chat — keep current SDK session
+        return _chat_log
+    # Switching to a different existing chat — reset session
+    if _chat_log is not None:
+        await _session.close()
+    _chat_log = chats.load_chat_log(chat_id)
     return _chat_log
+
+
+def _maybe_inject_recap(log: chats.ChatLog) -> str:
+    """If this chat already has prior messages AND the SDK session is
+    fresh (we just switched chats), return a recap to prepend to the
+    user's message. Returns "" when no injection is needed."""
+    # Recap is needed when there are messages already saved AND the
+    # SDK client doesn't yet exist for this session (i.e. fresh after
+    # _session.close()). The next call to run_turn() will create the
+    # client, and the user_message includes the recap as context.
+    if _session._client is not None:
+        return ""  # client kept across this turn — no recap needed
+    messages = log.data.get("messages", [])
+    if not messages:
+        return ""  # brand-new chat
+    recap = chats.render_history_for_resume(log.data["id"])
+    if not recap:
+        return ""
+    return recap + "\n\n## New user message:\n"
 
 
 class ChatRequest(BaseModel):
     message: str
+    chat_id: str | None = None  # continue this chat; None = start new
     attachments: list[dict] | None = None  # [{path, name, kind}, ...]
 
 
@@ -187,8 +229,18 @@ async def index():
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    log = _ensure_chat_log()
+    # Resolve which chat we're talking into. May close the previous
+    # Claude SDK session if the user switched chats.
+    try:
+        log = await _switch_to_chat(req.chat_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"chat {req.chat_id!r} not found")
     log.append_user(req.message)
+
+    # If we just resumed an existing chat (session is fresh), prepend
+    # the previous history as context so the new SDK client doesn't
+    # start blind.
+    recap = _maybe_inject_recap(log)
 
     # Bake attachment paths into the message so the agent sees them.
     message = req.message
@@ -206,6 +258,8 @@ async def chat(req: ChatRequest):
                 + "\n\n[Attachments — local paths the user just shared:]\n"
                 + "\n".join(atts_lines)
             )
+    if recap:
+        message = recap + message
 
     run_id = str(uuid.uuid4())
     queue: asyncio.Queue = asyncio.Queue()
@@ -218,6 +272,16 @@ async def chat(req: ChatRequest):
         except Exception:
             pass
 
+    # Tell the UI which chat this turn belongs to — frontend uses it to
+    # update its sidebar (highlight + bump-to-top) and to seed the
+    # currentChatId for follow-up messages.
+    await emit({
+        "type": "chat_meta",
+        "chat_id": log.data["id"],
+        "title": log.data.get("title"),
+        "resumed": bool(recap),  # tells UI we replayed history
+    })
+
     async def runner():
         try:
             await _session.run_turn(message, emit)
@@ -226,7 +290,51 @@ async def chat(req: ChatRequest):
             await emit({"type": "done"})
 
     asyncio.create_task(runner())
-    return {"run_id": run_id}
+    return {"run_id": run_id, "chat_id": log.data["id"]}
+
+
+# ============================================================
+# Chat history endpoints — sidebar in the UI consumes these
+# ============================================================
+
+@app.get("/api/chats")
+async def list_chats_api(limit: int = 50):
+    """List recent chats for the sidebar. Newest first."""
+    return {"chats": chats.list_chats(limit=limit)}
+
+
+@app.get("/api/chats/{chat_id}")
+async def read_chat_api(chat_id: str):
+    """Full message list for a chat — UI calls this when user clicks
+    a sidebar item to populate the chat view."""
+    try:
+        return chats.read_chat(chat_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"chat {chat_id!r} not found")
+
+
+class RenameChatRequest(BaseModel):
+    title: str
+
+
+@app.post("/api/chats/{chat_id}/rename")
+async def rename_chat_api(chat_id: str, req: RenameChatRequest):
+    out = chats.rename_chat(chat_id, req.title)
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("error", "rename failed"))
+    return out
+
+
+@app.delete("/api/chats/{chat_id}")
+async def delete_chat_api(chat_id: str):
+    """Delete a chat. If it was the active one, also clears the
+    server-side current-chat pointer so the next /chat call starts fresh."""
+    global _chat_log
+    out = chats.delete_chat(chat_id)
+    if _chat_log is not None and _chat_log.data.get("id") == chat_id:
+        await _session.close()
+        _chat_log = None
+    return out
 
 
 @app.get("/api/setup/status")

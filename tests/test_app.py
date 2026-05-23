@@ -1,16 +1,40 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from fastapi.testclient import TestClient
+
+import pytest
 
 import src.app as app_module
 
 
+@pytest.fixture(autouse=True)
+def _reset_active_chat():
+    """Each test starts with `_chat_log = None` so any state carried over
+    from earlier tests (which now leak through the chat-switching machinery)
+    doesn't trip up the MagicMock setup. Pytest tears the override down
+    automatically when the test finishes."""
+    with patch.object(app_module, "_chat_log", None):
+        yield
+
+
+def _make_fake_session(run_turn_impl=None):
+    """`_switch_to_chat` may await `_session.close()` to break the SDK
+    connection when the user moves between chats; MagicMock returns a
+    plain MagicMock (not awaitable). Use AsyncMock for the few coroutine
+    methods app.py calls on `_session`."""
+    fake = MagicMock()
+    fake.close = AsyncMock()
+    fake._client = None
+    if run_turn_impl is not None:
+        fake.run_turn = run_turn_impl
+    return fake
+
+
 def test_chat_returns_run_id():
-    fake_session = MagicMock()
     async def fake_run_turn(msg, emit):
         await emit({"type": "text", "text": "ok"})
         await emit({"type": "done"})
-    fake_session.run_turn = fake_run_turn
+    fake_session = _make_fake_session(fake_run_turn)
 
     with patch.object(app_module, "_session", fake_session):
         client = TestClient(app_module.app)
@@ -20,11 +44,10 @@ def test_chat_returns_run_id():
 
 
 def test_stream_emits_events_in_sse_format():
-    fake_session = MagicMock()
     async def fake_run_turn(msg, emit):
         await emit({"type": "text", "text": "ok"})
         await emit({"type": "done"})
-    fake_session.run_turn = fake_run_turn
+    fake_session = _make_fake_session(fake_run_turn)
 
     with patch.object(app_module, "_session", fake_session):
         client = TestClient(app_module.app)
@@ -37,7 +60,7 @@ def test_stream_emits_events_in_sse_format():
 
 
 def test_approve_resolves_pending():
-    fake_session = MagicMock()
+    fake_session = _make_fake_session()
     with patch.object(app_module, "_session", fake_session):
         client = TestClient(app_module.app)
         resp = client.post("/approve/abc-123", json={"approved": True})

@@ -101,6 +101,98 @@ def read_chat(chat_id: str) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def load_chat_log(chat_id: str) -> "ChatLog":
+    """Wrap an existing chat file as a writable ChatLog so the UI can
+    continue a previous conversation. Raises FileNotFoundError if the
+    chat doesn't exist.
+
+    The whole-chat flow:
+        - frontend POSTs /chat with `chat_id` → load_chat_log(chat_id)
+          gives us a ChatLog that appends to the SAME file. Old messages
+          stay; new turn gets appended below.
+        - frontend POSTs /chat with NO chat_id → ChatLog.start_new()
+          creates a fresh file with timestamp-id.
+    """
+    p = _chat_path(chat_id)
+    if not p.exists():
+        raise FileNotFoundError(f"chat {chat_id} not found")
+    data = json.loads(p.read_text(encoding="utf-8"))
+    return ChatLog(p, data)
+
+
+def rename_chat(chat_id: str, new_title: str) -> dict:
+    """Rewrite the `title` field. Returns {ok, title} on success."""
+    p = _chat_path(chat_id)
+    if not p.exists():
+        return {"ok": False, "error": f"chat {chat_id} not found"}
+    title = (new_title or "").strip()[:80]
+    if not title:
+        return {"ok": False, "error": "title cannot be empty"}
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["title"] = title
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "title": title}
+
+
+def delete_chat(chat_id: str) -> dict:
+    """Delete the chat file. Idempotent — returns ok=True even if missing."""
+    p = _chat_path(chat_id)
+    existed = p.exists()
+    if existed:
+        p.unlink()
+    return {"ok": True, "deleted": existed, "chat_id": chat_id}
+
+
+def render_history_for_resume(chat_id: str, max_chars: int = 8000) -> str:
+    """Compact text dump of a chat's recent history — fed to a fresh
+    Claude session when the user reopens a chat. Format:
+
+        ## Previous conversation (recap)
+        [user] question one
+        [assistant] short reply
+        [tool] drive_resolve_link({...}) → ok
+        ...
+
+    Tool-result previews are truncated. Total output capped at
+    `max_chars`; if a chat is longer, we keep the TAIL (most recent
+    messages — what the user is most likely to follow up on).
+    """
+    try:
+        data = json.loads(_chat_path(chat_id).read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    lines: list[str] = ["## Previous conversation (recap):"]
+    for msg in data.get("messages", []):
+        role = msg.get("role")
+        if role == "user":
+            text = (msg.get("text") or "").strip()
+            if text:
+                lines.append(f"[user] {text[:500]}")
+        elif role == "assistant":
+            for ev in msg.get("events", []):
+                t = ev.get("type")
+                if t == "text":
+                    txt = (ev.get("text") or "").strip()
+                    if txt:
+                        lines.append(f"[assistant] {txt[:500]}")
+                elif t == "tool_call":
+                    inp = json.dumps(ev.get("input", {}), ensure_ascii=False)[:120]
+                    lines.append(f"[tool] {ev.get('name')}({inp})")
+                elif t == "tool_result":
+                    preview = (ev.get("result_preview") or "")[:150]
+                    if preview:
+                        lines.append(f"[tool_result] {preview}")
+    text = "\n".join(lines)
+    if len(text) <= max_chars:
+        return text
+    # Keep tail — most recent content matters most for follow-up
+    tail = text[-max_chars:]
+    first_newline = tail.find("\n")
+    if first_newline > 0:
+        tail = tail[first_newline + 1:]
+    return "## Previous conversation (recap, truncated to most recent):\n" + tail
+
+
 def _assistant_text(message: dict) -> str:
     parts = []
     for ev in message.get("events", []):

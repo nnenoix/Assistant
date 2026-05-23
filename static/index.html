@@ -87,11 +87,106 @@
   ::-webkit-scrollbar-track { background: transparent; }
 
   /* layout */
+  body { display: flex; }
   .app {
     display: grid;
     grid-template-rows: auto 1fr auto;
     height: 100vh;
+    flex: 1;
+    min-width: 0;  /* otherwise overflow: scroll children grow past viewport */
+  }
+
+  /* chat sidebar — list of past conversations + new-chat button.
+     Sits flush against the left edge; .app shrinks to fill remainder. */
+  .chat-sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    height: 100vh;
+    background: var(--bg-2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .chat-sidebar-head {
+    padding: 14px 14px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .chat-sidebar-newbtn {
     width: 100%;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 8px 10px;
+    background: var(--primary);
+    color: var(--user-bubble-tx);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: var(--sans);
+    transition: opacity 0.12s;
+  }
+  .chat-sidebar-newbtn:hover { opacity: 0.92; }
+  .chat-sidebar-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 8px 14px;
+  }
+  .chat-row {
+    padding: 9px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+    color: var(--text-2);
+    font-size: 12.5px;
+    line-height: 1.35;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    position: relative;
+  }
+  .chat-row:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .chat-row.active {
+    background: var(--primary-soft);
+    color: var(--primary-text);
+    border-color: var(--primary-soft);
+  }
+  .chat-row-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+  .chat-row-meta {
+    font-size: 11px;
+    color: var(--text-3);
+    display: flex; justify-content: space-between; gap: 6px;
+  }
+  .chat-row-del {
+    background: none;
+    border: none;
+    color: var(--text-3);
+    cursor: pointer;
+    padding: 2px 4px;
+    margin: -2px -2px -2px 0;
+    border-radius: 4px;
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .chat-row:hover .chat-row-del { opacity: 1; }
+  .chat-row-del:hover { color: var(--danger-text); background: var(--danger-soft); }
+  .chat-sidebar-empty {
+    color: var(--text-3);
+    font-size: 12px;
+    text-align: center;
+    padding: 24px 16px;
+    line-height: 1.5;
   }
 
   /* header */
@@ -1023,7 +1118,7 @@ import {
   ChevronRight, TriangleAlert, Send, ShieldCheck, Sparkles, RefreshCw,
   Users, Copy, Check, Box, Sun, Moon,
   Paperclip, X, File, FileText, Image,
-  Pencil, Filter,
+  Pencil, Filter, Plus, Info,
 } from "https://esm.sh/lucide-preact@0.475.0?deps=preact@10.22.0";
 
 const html = htm.bind(h);
@@ -1063,6 +1158,8 @@ const ICONS = {
   image: Image,
   pencil: Pencil,
   filter: Filter,
+  plus: Plus,
+  info: Info,
 };
 const Icon = ({ name, size = 14, ...rest }) => {
   const Comp = ICONS[name] || ICONS.box;
@@ -2020,6 +2117,19 @@ function App() {
   const [model, setModel] = useState(null);
   const [models, setModels] = useState([]);
   const [modelBusy, setModelBusy] = useState(false);
+
+  // ─── chat persistence — sidebar lives off these
+  // chatList: {id, title, started_at, message_count}[]; populated on mount + after each turn
+  // currentChatId: which chat the next /chat call attaches to; null = start new on next send
+  const [chatList, setChatList] = useState([]);
+  const [currentChatId, setCurrentChatId] = useState(() => {
+    try { return localStorage.getItem("currentChatId") || null; } catch { return null; }
+  });
+  const refreshChatList = useCallback(() => {
+    fetch("/api/chats?limit=100").then(r => r.ok ? r.json() : { chats: [] })
+      .then(j => setChatList(j.chats || []))
+      .catch(() => {});
+  }, []);
   const [theme, setTheme] = useState(() => {
     try {
       const saved = localStorage.getItem("theme");
@@ -2061,6 +2171,116 @@ function App() {
       .then(j => setAccounts(j.accounts || []))
       .catch(() => {});
   }, []);
+
+  /* ── load chat list + restore last-active chat on mount ───── */
+  useEffect(() => {
+    refreshChatList();
+  }, [refreshChatList]);
+
+  // If localStorage had a currentChatId, hydrate the chat view from it
+  // ONCE on mount. Convert the stored .json format (messages[].events[])
+  // into the `turns` shape the chat view consumes.
+  useEffect(() => {
+    if (!currentChatId) return;
+    let cancelled = false;
+    fetch(`/api/chats/${currentChatId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (cancelled || !data) return;
+        const restored = [];
+        for (const m of (data.messages || [])) {
+          if (m.role === "user") {
+            restored.push({ role: "user", text: m.text || "" });
+            restored.push({ role: "assistant", events: [] });
+          } else if (m.role === "assistant") {
+            if (restored.length === 0 || restored[restored.length - 1].role !== "assistant") {
+              restored.push({ role: "assistant", events: [] });
+            }
+            const target = restored[restored.length - 1];
+            for (const ev of (m.events || [])) {
+              // Convert stored event shape back into UI event shape.
+              // Storage uses `type`; UI render uses `kind`.
+              if (ev.type === "text") {
+                target.events.push({ kind: "text", text: ev.text, id: cryptoId() });
+              } else if (ev.type === "tool_call") {
+                target.events.push({
+                  kind: "tool", id: ev.tool_use_id || cryptoId(),
+                  name: ev.name, input: ev.input,
+                  status: "complete",
+                });
+              } else if (ev.type === "tool_result" || ev.type === "tool_error") {
+                // attach result to the most-recent matching tool event
+                const tool = [...target.events].reverse()
+                  .find(e => e.kind === "tool" && e.id === ev.tool_use_id);
+                if (tool) {
+                  tool.result_preview = ev.result_preview;
+                  tool.status = ev.type === "tool_error" ? "error" : "complete";
+                }
+              }
+            }
+          }
+        }
+        if (!cancelled) setTurns(restored);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);  // intentionally run only once on mount
+
+  const onNewChat = useCallback(() => {
+    setCurrentChatId(null);
+    try { localStorage.removeItem("currentChatId"); } catch {}
+    setTurns([]);
+    setConnError(null);
+  }, []);
+
+  const onSelectChat = useCallback(async (chatId) => {
+    if (chatId === currentChatId) return;
+    setCurrentChatId(chatId);
+    try { localStorage.setItem("currentChatId", chatId); } catch {}
+    setConnError(null);
+    setTurns([]);  // clear, then fill from history below
+    try {
+      const data = await fetch(`/api/chats/${chatId}`).then(r => r.json());
+      const restored = [];
+      for (const m of (data.messages || [])) {
+        if (m.role === "user") {
+          restored.push({ role: "user", text: m.text || "" });
+          restored.push({ role: "assistant", events: [] });
+        } else if (m.role === "assistant") {
+          if (restored.length === 0 || restored[restored.length - 1].role !== "assistant") {
+            restored.push({ role: "assistant", events: [] });
+          }
+          const target = restored[restored.length - 1];
+          for (const ev of (m.events || [])) {
+            if (ev.type === "text") {
+              target.events.push({ kind: "text", text: ev.text, id: cryptoId() });
+            } else if (ev.type === "tool_call") {
+              target.events.push({
+                kind: "tool", id: ev.tool_use_id || cryptoId(),
+                name: ev.name, input: ev.input, status: "complete",
+              });
+            } else if (ev.type === "tool_result" || ev.type === "tool_error") {
+              const tool = [...target.events].reverse()
+                .find(e => e.kind === "tool" && e.id === ev.tool_use_id);
+              if (tool) {
+                tool.result_preview = ev.result_preview;
+                tool.status = ev.type === "tool_error" ? "error" : "complete";
+              }
+            }
+          }
+        }
+      }
+      setTurns(restored);
+    } catch {}
+  }, [currentChatId]);
+
+  const onDeleteChat = useCallback(async (chatId) => {
+    if (!confirm("Удалить этот чат? Восстановить нельзя.")) return;
+    await fetch(`/api/chats/${chatId}`, { method: "DELETE" });
+    refreshChatList();
+    if (chatId === currentChatId) onNewChat();
+  }, [currentChatId, onNewChat, refreshChatList]);
 
   /* ── load model selection on mount ──────────────────────────── */
   useEffect(() => {
@@ -2275,6 +2495,18 @@ function App() {
       }
       case "done": {
         closeStream();
+        // Bump sidebar — last-modified-time changed, message count grew.
+        refreshChatList();
+        break;
+      }
+      case "chat_meta": {
+        // Server tells us which chat this turn lives in (first event of
+        // a turn). Lock our currentChatId to it + ensure sidebar shows
+        // the row highlighted.
+        if (ev.chat_id && ev.chat_id !== currentChatId) {
+          setCurrentChatId(ev.chat_id);
+          try { localStorage.setItem("currentChatId", ev.chat_id); } catch {}
+        }
         break;
       }
       case "model_used": {
@@ -2325,6 +2557,7 @@ function App() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           message: text,
+          chat_id: currentChatId,
           attachments: atts.map(a => ({ name: a.name, path: a.path, kind: a.kind })),
         }),
       });
@@ -2332,6 +2565,12 @@ function App() {
       const j = await r.json();
       runId = j.run_id;
       if (!runId) throw new Error("no run_id in response");
+      // Server may have created a NEW chat (when we sent chat_id=null).
+      // Pick up its id so follow-up messages continue the same chat.
+      if (j.chat_id && j.chat_id !== currentChatId) {
+        setCurrentChatId(j.chat_id);
+        try { localStorage.setItem("currentChatId", j.chat_id); } catch {}
+      }
     } catch (e) {
       setStreaming(false);
       setConnError(`Не удалось отправить запрос: ${e.message}`);
@@ -2388,6 +2627,13 @@ function App() {
   }
 
   return html`
+    <${ChatSidebar}
+      chats=${chatList}
+      currentChatId=${currentChatId}
+      onNewChat=${onNewChat}
+      onSelectChat=${onSelectChat}
+      onDeleteChat=${onDeleteChat}
+    />
     <div class="app">
       <${Header}
         accounts=${accounts}
@@ -2429,6 +2675,60 @@ function App() {
       <${ApprovalModal} req=${currentApproval} onResolve=${onApprovalResolve} />
       <${AccountsModal} open=${accountsOpen} onClose=${() => { setAccountsOpen(false); fetch("/api/accounts").then(r => r.json()).then(j => setAccounts(j.accounts || [])).catch(() => {}); }} />
     </div>
+  `;
+}
+
+/* ── chat sidebar — list of past conversations + new-chat button ───── */
+function ChatSidebar({ chats, currentChatId, onNewChat, onSelectChat, onDeleteChat }) {
+  // Light date formatter — "Сегодня · 14:32" / "Вчера · 09:01" / "22 мая · 14:00"
+  const fmtTime = (iso) => {
+    if (!iso) return "";
+    let d;
+    try { d = new Date(iso); } catch { return ""; }
+    if (isNaN(d.getTime())) return "";
+    const now = new Date();
+    const ymd = (x) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
+    const sameDay = ymd(d) === ymd(now);
+    const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+    const isYesterday = ymd(d) === ymd(yesterday);
+    const hm = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+    if (sameDay) return `Сегодня · ${hm}`;
+    if (isYesterday) return `Вчера · ${hm}`;
+    return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short" }) + ` · ${hm}`;
+  };
+  return html`
+    <aside class="chat-sidebar">
+      <div class="chat-sidebar-head">
+        <button class="chat-sidebar-newbtn" onClick=${onNewChat} title="Начать новый чат">
+          <${Icon} name="plus" /> Новый чат
+        </button>
+      </div>
+      <div class="chat-sidebar-list">
+        ${(chats || []).length === 0 ? html`
+          <div class="chat-sidebar-empty">
+            Пока пусто.<br/>Напиши первое сообщение — оно создаст чат.
+          </div>
+        ` : (chats || []).map(c => html`
+          <div
+            key=${c.id}
+            class=${"chat-row" + (c.id === currentChatId ? " active" : "")}
+            onClick=${(e) => {
+              // Don't fire select if delete button was clicked
+              if (e.target.closest(".chat-row-del")) return;
+              onSelectChat(c.id);
+            }}
+            title=${c.title || "(без названия)"}>
+            <div class="chat-row-title">${c.title || "(без названия)"}</div>
+            <div class="chat-row-meta">
+              <span>${fmtTime(c.started_at)} · ${c.message_count || 0} сооб.</span>
+              <button class="chat-row-del"
+                onClick=${(e) => { e.stopPropagation(); onDeleteChat(c.id); }}
+                title="Удалить чат">×</button>
+            </div>
+          </div>
+        `)}
+      </div>
+    </aside>
   `;
 }
 
