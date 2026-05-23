@@ -279,6 +279,40 @@ def audit_log(action: str, tool: str, args: dict,
     return {"ok": True, "data": {"audit_id": record["correlation_id"]}}
 
 
+# Default rotation threshold — 10 MB per audit file. Past this the
+# current file is renamed `audit.jsonl.YYYY-MM-DDTHH-MM-SS` and a fresh
+# `audit.jsonl` is started. Old segments stay around for the operator
+# to ship to S3 / Loki / wherever long-term storage lives.
+_AUDIT_ROTATE_BYTES = 10 * 1024 * 1024
+
+
+def audit_rotate(threshold_bytes: int | None = None) -> dict:
+    """Rotate `audit.jsonl` if it exceeds `threshold_bytes` (default 10 MB).
+
+    Returns {ok, data: {rotated, archived_path?, size_before}}.
+    Designed for an arq cron job (daily) or manual cleanup. The migrate
+    helper (`scripts/migrate_jsonl_to_pg.py`) ingests archived segments
+    too — pass `--data-dir` pointing at a directory holding rotated
+    files to import them all.
+    """
+    threshold = threshold_bytes if threshold_bytes is not None else _AUDIT_ROTATE_BYTES
+    if not _AUDIT_PATH.exists():
+        return {"ok": True, "data": {"rotated": False, "size_before": 0,
+                                      "reason": "no audit file"}}
+    size = _AUDIT_PATH.stat().st_size
+    if size < threshold:
+        return {"ok": True, "data": {"rotated": False, "size_before": size,
+                                      "threshold_bytes": threshold}}
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    archived = _AUDIT_PATH.with_suffix(f".jsonl.{ts}")
+    _AUDIT_PATH.rename(archived)
+    # Touch a fresh empty audit.jsonl so the next append doesn't have
+    # to recreate the directory tree.
+    _AUDIT_PATH.touch()
+    return {"ok": True, "data": {"rotated": True, "archived_path": str(archived),
+                                  "size_before": size}}
+
+
 def audit_search(actor: str | None = None, tool: str | None = None,
                  action: str | None = None, since_iso: str | None = None,
                  limit: int = 100) -> dict:

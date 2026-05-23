@@ -66,6 +66,15 @@ def _connect() -> sqlite3.Connection:
         _conn = None
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None)
+    # WAL mode: concurrent readers don't block writers (vs. the default
+    # "rollback journal" which serializes everything). Tradeoff: leaves
+    # `-wal` + `-shm` files next to the .sqlite. NB: PRAGMA must be set
+    # AFTER connection open; failing silently is fine (busy older sqlite).
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")  # WAL-safe + faster
+    except Exception:
+        pass
     conn.execute(
         "CREATE TABLE IF NOT EXISTS idempotency ("
         " tenant_id TEXT NOT NULL DEFAULT 'default',"
@@ -170,6 +179,38 @@ def clear() -> int:
         before = conn.execute("SELECT COUNT(*) FROM idempotency").fetchone()[0]
         conn.execute("DELETE FROM idempotency")
         return before
+
+
+def sweep_expired(ttl_seconds: float | None = None) -> int:
+    """Delete expired idempotency entries. Returns count removed.
+
+    Callers: arq cron job (hourly), or manual `python -m
+    scripts.idempotency_sweep`. Without this the sqlite file grows
+    unbounded — entries past TTL are functionally inert (lookup returns
+    `hit: False, expired: True`) but they still consume disk.
+
+    Pass `ttl_seconds=None` to use the module's DEFAULT_TTL_S; pass a
+    custom value (e.g. 3600 for hourly cleanup with a 1h TTL override)
+    only for tests.
+    """
+    ttl = DEFAULT_TTL_S if ttl_seconds is None else ttl_seconds
+    cutoff = time.time() - ttl
+    with _lock:
+        conn = _connect()
+        cur = conn.execute(
+            "DELETE FROM idempotency WHERE created_at < ?",
+            (cutoff,),
+        )
+        # Reclaim disk space — sqlite VACUUM is expensive but the sweep
+        # already runs off the hot path. Skip if delete touched nothing.
+        if cur.rowcount > 0:
+            try:
+                conn.execute("VACUUM")
+            except sqlite3.OperationalError:
+                # VACUUM inside a transaction fails; we're autocommit so
+                # this is the "another writer" case — defer to next sweep.
+                pass
+        return cur.rowcount or 0
 
 
 def _reset_for_tests(tmp_path: Path) -> None:
