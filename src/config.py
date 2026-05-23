@@ -66,9 +66,11 @@ CLIENT_SECRET_PATH = _find_client_secret()
 import os as _os
 _os.environ.setdefault(
     "UPDATE_MANIFEST_URL",
-    # Leave empty by default — UI hides the banner when unset. Set this
-    # via spec / .env / packaging step when distributing.
-    "",
+    # Points at the manifest.json produced by .github/workflows/release.yml
+    # on every `v*` tag push. Installed .exe instances poll this URL via
+    # /api/updates/check and surface a banner when latest_version differs
+    # from the bundled version.
+    "https://github.com/nnenoix/Google-work/releases/latest/download/manifest.json",
 )
 
 SCOPES = [
