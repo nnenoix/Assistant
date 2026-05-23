@@ -288,6 +288,16 @@ async def chat(req: ChatRequest):
         except Exception as e:
             await emit({"type": "fatal_error", "error": _scrub_secrets(f"{type(e).__name__}: {e}")})
             await emit({"type": "done"})
+        finally:
+            # Close the SDK client after every turn so the next /chat
+            # always gets a fresh session + replays the history recap.
+            # Without this, SDK might keep the connection alive but
+            # silently drop prior-turn context, leaving the agent
+            # "stateless" against its own history.
+            try:
+                await _session.close()
+            except Exception:
+                pass
 
     asyncio.create_task(runner())
     return {"run_id": run_id, "chat_id": log.data["id"]}
@@ -627,8 +637,90 @@ async def upload(files: list[UploadFile] = File(...), folder_name: str | None = 
         "batch_dir": str(batch_dir.resolve()),
         "count": len(saved),
         "files": saved,
+        # Filled below; keep this comment so the indent diff stays small.
         "is_folder": folder_name is not None,
         "folder_name": folder_name,
+    }
+
+
+@app.post("/api/pick_folder")
+async def pick_folder_api():
+    """Open the native OS folder picker (pywebview) and return the chosen
+    absolute path. UI calls this when the user clicks the folder-attach
+    icon — works MUCH better than `<input webkitdirectory>` which in
+    pywebview/WebView2 sometimes falls back to a file picker.
+
+    Returns:
+        {ok: True, path: "<absolute path>", name: "<basename>"}
+        {ok: False, error: str}  — when user cancelled or pywebview unavailable
+
+    Browser-only fallback: if pywebview isn't running (pure HTTP access
+    via a remote browser), returns {ok: False, error: "native dialog
+    unavailable"} so the frontend can fall back to the file-input flow.
+    """
+    try:
+        import webview
+        windows = webview.windows
+        if not windows:
+            return {"ok": False, "error": "no active pywebview window — "
+                    "this endpoint only works when running inside the desktop wrapper"}
+        result = await asyncio.to_thread(
+            windows[0].create_file_dialog,
+            webview.FOLDER_DIALOG,
+        )
+    except ImportError:
+        return {"ok": False, "error": "pywebview not installed (running in plain HTTP mode)"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    if not result:
+        # User cancelled
+        return {"ok": False, "error": "cancelled"}
+    # pywebview returns either a tuple of paths or a single string depending
+    # on the platform — normalize.
+    path = result[0] if isinstance(result, (list, tuple)) else result
+    from pathlib import Path
+    p = Path(path)
+    return {"ok": True, "path": str(p.resolve()), "name": p.name}
+
+
+@app.post("/api/register_folder")
+async def register_folder_api(req: dict):
+    """Register an already-existing folder path as an "attachment" without
+    copying it into .data/uploads. Used after /api/pick_folder gave us a
+    real absolute path the user picked from disk.
+
+    Body: {"path": "C:/Users/.../some/folder"}
+    Returns the same shape as /api/upload so the UI can treat folder
+    attachments uniformly.
+    """
+    from pathlib import Path
+    raw = (req or {}).get("path", "").strip()
+    if not raw:
+        raise HTTPException(400, "path is required")
+    p = Path(raw).resolve()
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(404, f"folder not found: {raw}")
+    # Quick stat — count files + total size — so the UI can show meaningful info
+    total_size = 0
+    file_count = 0
+    for f in p.rglob("*"):
+        if f.is_file():
+            try:
+                total_size += f.stat().st_size
+                file_count += 1
+            except OSError:
+                pass
+            # Stop counting past a sane cap so very large folders don't hang
+            if file_count > 10000:
+                break
+    return {
+        "ok": True,
+        "path": str(p),
+        "name": p.name,
+        "size": total_size,
+        "kind": "folder",
+        "file_count": file_count,
     }
 
 

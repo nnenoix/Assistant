@@ -134,6 +134,10 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,
+    # Windows VersionInfo — Firewall / SmartScreen / Defender prompts
+    # show "Workspace Agent" instead of the bare filename. See
+    # version_info.txt for the resource contract.
+    version="version_info.txt",
 )
 
 coll = COLLECT(

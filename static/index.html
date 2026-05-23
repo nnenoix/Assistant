@@ -1816,7 +1816,41 @@ function Composer({ disabled, onSend }) {
           <button
             class="attach-btn"
             disabled=${disabled}
-            onClick=${() => folderInputRef.current?.click()}
+            onClick=${async () => {
+              // Prefer pywebview's native folder dialog — webkitdirectory
+              // is flaky under WebView2 and sometimes opens a file picker.
+              // Falls back to the input[webkitdirectory] flow when the
+              // app runs in a remote browser (no pywebview).
+              try {
+                const r = await fetch("/api/pick_folder", { method: "POST" })
+                  .then(r => r.json());
+                if (r.ok && r.path) {
+                  const reg = await fetch("/api/register_folder", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ path: r.path }),
+                  }).then(r => r.json());
+                  if (reg.ok) {
+                    setAttachments(prev => [...prev, {
+                      id: cryptoId(),
+                      name: reg.name,
+                      path: reg.path,
+                      size: reg.size,
+                      kind: "folder",
+                      file_count: reg.file_count,
+                    }]);
+                    return;
+                  }
+                }
+                // Native dialog unavailable or cancelled → fall back to the
+                // webkitdirectory input (still works in pure-browser mode).
+                if (r.error && r.error !== "cancelled") {
+                  folderInputRef.current?.click();
+                }
+              } catch {
+                folderInputRef.current?.click();
+              }
+            }}
             aria-label="Прикрепить папку"
             title="Прикрепить папку"
           >

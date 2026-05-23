@@ -450,6 +450,102 @@ def _parse_drive_url(url: str) -> dict:
     return {"kind": "unknown", "id": None}
 
 
+def fetch_text(
+    url: str,
+    wait_ms: int = 2000,
+    timeout_sec: int = 30,
+    profile: str = "default",
+    selector: str | None = None,
+    max_chars: int = 50000,
+) -> dict:
+    """Fetch a page through a REAL browser and return its rendered text.
+
+    Use when `web_fetch` returns garbage or 403 — typical cases:
+      - Cloudflare / Ozon / similar anti-bot pages that block raw HTTP
+      - SPAs (React/Vue/Angular) that render content via JavaScript
+      - Pages that require an existing logged-in session (use `profile`)
+
+    What happens:
+      - Launches the persistent Playwright profile.
+      - Navigates to `url`, waits for `domcontentloaded` then an extra
+        `wait_ms` (default 2s) for JS to finish painting.
+      - If `selector` is provided, waits for it specifically (up to
+        timeout_sec) — useful when the page lazy-loads main content.
+      - Extracts `document.body.innerText`, returns the first
+        `max_chars` chars.
+
+    Returns:
+      {ok: True, url: <final>, title, text, char_count, truncated, _meta}
+      {ok: False, error, error_kind, _meta}
+    """
+    import time
+    t0 = time.time()
+    try:
+        pw, ctx, channel = _launch_persistent(headless=True, profile=profile)
+    except Exception as e:
+        from src.tools._errors import _classify_exception
+        kind, _ = _classify_exception(e)
+        return {
+            "ok": False, "error": f"browser launch failed: {str(e)[:200]}",
+            "error_kind": kind, "_meta": {"profile": profile},
+        }
+    try:
+        page = ctx.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
+        except Exception as nav_err:
+            return {
+                "ok": False,
+                "error": f"navigation failed: {type(nav_err).__name__}: {str(nav_err)[:200]}",
+                "error_kind": "network",
+                "_meta": {"url": url, "took_ms": int((time.time() - t0) * 1000)},
+            }
+        # Let JS settle. Sites that use React/Vue need a beat after
+        # DOMContentLoaded; `selector` is more deterministic when caller
+        # knows what to wait for.
+        if selector:
+            try:
+                page.wait_for_selector(selector, timeout=timeout_sec * 1000)
+            except Exception:
+                # Selector never appeared — still return whatever IS there
+                # so the caller can decide if it's useful.
+                pass
+        else:
+            page.wait_for_timeout(wait_ms)
+
+        final_url = page.url
+        title = (page.title() or "")[:300]
+        try:
+            text = page.evaluate("() => document.body.innerText || ''")
+        except Exception:
+            text = ""
+
+        truncated = len(text) > max_chars
+        if truncated:
+            text = text[:max_chars]
+
+        return {
+            "ok": True,
+            "url": final_url,
+            "title": title,
+            "text": text,
+            "char_count": len(text),
+            "truncated": truncated,
+            "_meta": {
+                "profile": profile,
+                "browser_channel": channel,
+                "took_ms": int((time.time() - t0) * 1000),
+                "selector_used": selector,
+            },
+        }
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        pw.stop()
+
+
 def drive_open(
     url: str,
     profile: str = "default",

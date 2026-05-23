@@ -2828,6 +2828,26 @@ TOOLS = [
             "required": ["script_id", "project_number"],
         },
     ),
+    # --- Browser-rendered web fetch — for anti-bot / SPA pages ---
+    _tool(
+        "browser_fetch_text",
+        browser.fetch_text,
+        "drive.read",  # treated like a read — no destructive action
+        "**Read a web page through a REAL Chromium browser** when `web_fetch` doesn't work. USE WHEN: web_fetch returned 403 / blocked / 'access denied' (anti-bot like Cloudflare, Ozon, etc.), OR the page is an SPA (React/Vue/Angular) that renders content via JavaScript so raw HTTP sees an empty body. The browser executes JS, waits for content to paint, then returns `document.body.innerText`. Slower (3-5s) than web_fetch but works on pages that block server-side IPs or require JS. Pass `selector` to wait for a specific element to appear; otherwise we wait `wait_ms` (default 2s) after DOMContentLoaded.",
+        {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "wait_ms": {"type": "integer", "default": 2000, "description": "Extra wait after DOMContentLoaded for JS to finish (ignored if `selector` provided)."},
+                "timeout_sec": {"type": "integer", "default": 30},
+                "profile": {"type": "string", "default": "default", "description": "Browser profile (use a logged-in one when the page requires auth)."},
+                "selector": {"type": "string", "description": "Optional CSS selector to wait for — more deterministic than wait_ms."},
+                "max_chars": {"type": "integer", "default": 50000},
+            },
+            "required": ["url"],
+        },
+        category="web",
+    ),
     # --- Drive UI fallback: open shared link through logged-in profile ---
     _tool(
         "drive_browser_open",
