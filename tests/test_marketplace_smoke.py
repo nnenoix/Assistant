@@ -47,9 +47,11 @@ def _by_name() -> dict:
     return {t["name"]: t for t in registry.TOOLS}
 
 
-def test_total_tool_count_is_403():
-    """The user's explicit ask: 403 tools end-to-end."""
-    assert len(registry.TOOLS) == 403
+def test_total_tool_count_meets_target():
+    """The user's original ask was "403 tools end-to-end". Followups
+    have added more (currently +2 for the DOCX template render pair);
+    the floor is the original target, no hard ceiling."""
+    assert len(registry.TOOLS) >= 403
 
 
 def test_all_expected_new_tools_registered():

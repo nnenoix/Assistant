@@ -12,7 +12,7 @@ from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
 
 from src import auth
 from src.tools import (
-    _idempotency, _quota,
+    _docx_template, _idempotency, _quota,
     aliases, analytics, analytics_local, apps_script, apps_script_api,
     bank_parser, browser, calendar, chats, cloud_logging, contacts, docs,
     drive, edo, excel, external, file_analyze, file_extract, forms, gcp,
@@ -3025,6 +3025,37 @@ TOOLS = [
                 "top_k": {"type": "integer", "description": "Max results. Default 5."},
             },
             "required": ["query"],
+        },
+        category="files",
+    ),
+    # --- DOCX template rendering (Phase 0 followup: TrueStats reports) ---
+    _tool(
+        "docx_template_list_placeholders",
+        _docx_template.list_placeholders,
+        "files.read",
+        "List every `{var}` placeholder referenced by a .docx template. Use BEFORE docx_template_render to know which fields you need to provide. Returns {placeholders: [...], paragraph_count, table_count}. Reads from both regular paragraphs AND table cells (the TrueStats weekly-report template carries most placeholders inside tables).",
+        {
+            "type": "object",
+            "properties": {
+                "template_path": {"type": "string", "description": "Local path to the .docx template file."},
+            },
+            "required": ["template_path"],
+        },
+        category="files",
+    ),
+    _tool(
+        "docx_template_render",
+        _docx_template.render,
+        "files.write",
+        "Fill a .docx template with the supplied `data` dict and write the result to `output_path`. Placeholder syntax is `{var_name}` (plain braces — Word treats them as text so the template stays editable). Missing keys do NOT raise — placeholders are left intact in the output and surfaced via `missing_vars` so the user can spot a forgotten field. Used for TrueStats weekly reports: list placeholders, gather data, render filled docx.",
+        {
+            "type": "object",
+            "properties": {
+                "template_path": {"type": "string", "description": "Local path to the .docx template."},
+                "output_path": {"type": "string", "description": "Where to save the rendered .docx. Parent directory is created if missing."},
+                "data": {"type": "object", "description": "Map of placeholder name → value (any JSON-serializable). Extra keys are ignored; missing ones are reported in `missing_vars`."},
+            },
+            "required": ["template_path", "output_path", "data"],
         },
         category="files",
     ),
