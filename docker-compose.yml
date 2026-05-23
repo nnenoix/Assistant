@@ -116,6 +116,34 @@ services:
       - "4317:4317"  # OTLP gRPC
       - "4318:4318"  # OTLP HTTP
 
+  telegram_bot:
+    # Sidecar that polls Telegram /getUpdates and routes approve/deny
+    # through src.telegram_bot.poll_once. Opt-in via the `telegram`
+    # profile (`docker compose --profile telegram up`) so a default
+    # `docker compose up` doesn't crash-loop when TG_BOT_TOKEN is unset.
+    # Mounts the same agent_data volume so the bot sees the same
+    # approvals.jsonl + authorized_chats state the agent writes.
+    build: .
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -z "$$TG_BOT_TOKEN" ]; then
+          echo "TG_BOT_TOKEN not set — exiting"; exit 1
+        fi
+        echo "Telegram bot poller starting..."
+        exec uv run python -m src.telegram_bot_loop
+    environment:
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TG_AUTHORIZED_CHATS: ${TG_AUTHORIZED_CHATS:-}
+      DATA_DIR: /app/.data
+    volumes:
+      - agent_data:/app/.data
+    profiles:
+      - telegram
+
 volumes:
   postgres_data:
   redis_data:

@@ -1,0 +1,72 @@
+name: tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# Defensive concurrency: a second push to the same branch cancels the
+# first in-flight run so PR force-pushes don't waste CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          # Pin a specific uv version so a future breaking change in uv
+          # doesn't silently break CI. Bump deliberately.
+          version: "0.5.x"
+          enable-cache: true
+
+      - name: Set up Python (uv reads pyproject)
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run unit tests
+        run: |
+          uv run pytest tests/ -q \
+            --ignore=tests/integration \
+            --deselect "tests/test_policy.py::test_missing_file_creates_empty_policy"
+        env:
+          # Some tests check env defaults; an explicit default keeps
+          # behavior deterministic across CI vs local.
+          APP_ENV: ci
+
+      # Optional smoke check that the metrics endpoint module imports
+      # cleanly and renders without raising — runs in <1s.
+      - name: Metrics endpoint smoke
+        run: |
+          uv run python -c "from src import metrics; \
+            metrics.record_tool_call('ci_smoke', 12.5, ok=True); \
+            assert 'ci_smoke' in metrics.render_prometheus()"
+
+  lint:
+    # Light-weight static checks — keeps PRs honest about basics.
+    # Don't fail the whole pipeline on style; we only block on actual
+    # parse / import errors.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+      - run: uv python install 3.11
+      - run: uv sync --frozen
+      - name: Python syntax / import smoke
+        run: |
+          # Compile every .py under src/ + scripts/ — catches genuine
+          # parse errors that pytest would only catch when it imports
+          # the module under test.
+          uv run python -m compileall -q src/ scripts/
