@@ -261,3 +261,76 @@ def test_write_and_verify_handles_none_and_empty_as_equivalent(monkeypatch):
         mock_read.return_value = {"values": [[None, 5]], "_meta": {}}
         result = sheets.write_and_verify("SID", "S!A1:B1", [["", 5]])
     assert result["verdict"] == "ok"
+
+
+# ============================================================
+# Phase 14D regression: verify_claim runs refs in parallel
+# ============================================================
+
+def test_verify_claim_resolves_refs_in_parallel():
+    """Regression for Phase 14D: with N refs each taking ~50ms of fake
+    network, total wall-clock must be ≪ N×50ms (i.e., parallel) and
+    bounded by ~N/workers × 50ms. With 20 refs × 50ms / 10 workers we
+    expect ~100ms wall-clock; bake a generous 600ms cap so flaky CI
+    doesn't false-alarm but a real serial regression (1000ms) trips."""
+    import time as _time
+    from unittest.mock import patch
+    from src.tools import verify
+
+    def slow_read(spreadsheet_id, cell, **kw):
+        _time.sleep(0.05)  # 50ms per call
+        return {"values": [[42]], "_meta": {"range_read": cell}}
+
+    refs = [f"sheets:SID:Sheet!A{i}=42" for i in range(1, 21)]  # 20 refs
+
+    started = _time.perf_counter()
+    with patch("src.tools.sheets.read_range", side_effect=slow_read):
+        result = verify.verify_claim("test", refs, max_workers=10)
+    elapsed_ms = (_time.perf_counter() - started) * 1000
+
+    assert result["verdict"] == "ok"
+    assert result["_meta"]["ref_count"] == 20
+    assert result["_meta"]["parallel"] is True
+    # Serial would be ~20×50ms = 1000ms; parallel @10 workers = ~100-200ms.
+    assert elapsed_ms < 600, (
+        f"verify_claim took {elapsed_ms:.0f}ms for 20×50ms refs — "
+        f"expected parallel execution"
+    )
+
+
+def test_verify_claim_max_workers_is_clamped():
+    """Even if caller passes max_workers=1000, we cap at 32."""
+    from src.tools import verify
+    with patch("src.tools.sheets.read_range") as mock_read:
+        mock_read.return_value = {"values": [[1]], "_meta": {"range_read": "A1"}}
+        result = verify.verify_claim(
+            "test",
+            ["sheets:SID:A1=1"],
+            max_workers=1000,
+        )
+    # 1 ref → workers = min(1000, 32, 1) = 1
+    assert result["_meta"]["max_workers"] == 1
+
+
+def test_verify_claim_handles_per_ref_exception_gracefully():
+    """A raising _verify_one shouldn't break the whole batch — exception
+    is caught + the per_ref entry surfaces as status=error."""
+    from src.tools import verify
+
+    call_count = {"n": 0}
+
+    def flaky_read(spreadsheet_id, cell, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise RuntimeError("transient network blip")
+        return {"values": [[42]], "_meta": {"range_read": cell}}
+
+    refs = [f"sheets:SID:A{i}=42" for i in range(1, 4)]  # 3 refs
+    with patch("src.tools.sheets.read_range", side_effect=flaky_read):
+        result = verify.verify_claim("test", refs, max_workers=1)
+    # 1 worker so call order is deterministic — ref #2 errors
+    error_count = sum(1 for r in result["per_ref"] if r["status"] == "error")
+    ok_count = sum(1 for r in result["per_ref"] if r["status"] == "ok")
+    assert error_count == 1
+    assert ok_count == 2
+    assert result["verdict"] == "error"  # any error → error verdict
