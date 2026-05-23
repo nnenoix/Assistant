@@ -135,13 +135,30 @@ migrate to Postgres for multi-instance / multi-tenant deployment:
 
 1. Run `alembic upgrade head` (creates the schema)
 2. Set `USE_POSTGRES_STORAGE=1` in `.env`
-3. Run the migration helper:
+3. Preview what would migrate (safe — no writes):
    ```bash
    docker compose exec agent uv run python -m scripts.migrate_jsonl_to_pg
    ```
-   (script: NOT yet written — followup. It walks each `.data/infra/*.jsonl`
-   and INSERTS into the matching table, tagging every row with the
-   default tenant_id.)
+4. Apply it for real:
+   ```bash
+   docker compose exec agent uv run python -m scripts.migrate_jsonl_to_pg --apply
+   ```
+
+Source → target mapping:
+
+| Source file | Target table | Idempotent re-run |
+|---|---|---|
+| `approvals.jsonl` | `approvals` | yes — UPSERT on approval_id |
+| `audit.jsonl` | `audit_log` | no natural key — refuses re-run unless `--allow-duplicates` |
+| `kpi_history.jsonl` | `kpi_history` | same as above |
+| `mdm/<table>.json` | `mdm_records` | yes — UPSERT on (tenant_id, table_name, record_id) |
+
+Flags:
+- `--tenant-id <id>`: tag every imported row (default `default`).
+- `--data-dir <path>`: override source dir (default `.data/infra`).
+- `--allow-duplicates`: bypass audit/kpi rerun guard. DANGEROUS.
+
+Exit codes: 0=clean, 1=errors logged in report, 2=refused.
 
 ## 8. Operational quick reference
 
