@@ -142,24 +142,24 @@ def test_http_500_maps_to_server():
     assert out["error_kind"] == "server"
 
 
-def test_url_error_treated_as_server():
-    """DNS failures / connection refused / TLS errors all surface as
-    URLError. Mapping to `server` is conservative — caller can suppress
-    the popup and just log it."""
+def test_url_error_treated_as_network():
+    """DNS failures / connection refused / TLS errors surface as URLError;
+    the project-wide classifier maps these to `network` (distinct from
+    `server` which is for 5xx). Caller can suppress the popup or just log."""
     with patch("urllib.request.urlopen",
                side_effect=URLError("Name or service not known")):
         out = updater.check_for_updates("0.1.0", "https://x/m.json")
     assert out["ok"] is False
-    assert out["error_kind"] == "server"
+    assert out["error_kind"] == "network"
     assert out["_meta"]["http_status"] is None
     assert "URLError" in out["error"]
 
 
-def test_timeout_treated_as_server():
+def test_timeout_treated_as_network():
     with patch("urllib.request.urlopen",
                side_effect=TimeoutError("slow CDN")):
         out = updater.check_for_updates("0.1.0", "https://x/m.json", timeout=1)
-    assert out["error_kind"] == "server"
+    assert out["error_kind"] == "network"
 
 
 def test_non_json_response_is_bad_input():

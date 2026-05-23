@@ -267,12 +267,14 @@ def migrate_mdm(conn, dialect: str, data_dir: Path, tenant_id: str,
         return report
 
     p = _q(dialect)
+    # Lazy import — keeps the script's module-level imports light when
+    # only the parser bits are needed (tests, dry-run).
+    from src.tools._safe_id import is_safe_id
     for path in sorted(mdm_dir.glob("*.json")):
         table_name = path.stem
-        # Re-validate against the same regex `infra._safe_table` enforces
+        # Validate against the same contract `infra._safe_table` enforces
         # so we don't import names that the live tools would later refuse.
-        import re
-        if not re.match(r"^[A-Za-z0-9_\-]{1,64}$", table_name):
+        if not is_safe_id(table_name):
             report.errors.append(f"skipping unsafe table name: {table_name!r}")
             continue
         records = list(_iter_json_array(path))

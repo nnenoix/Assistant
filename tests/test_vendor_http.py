@@ -36,15 +36,17 @@ def _make_http_error(code: int, body: bytes = b'{"err":"x"}'):
 
 
 # ============================================================
-# classifier
+# classifier — vocabulary must match src.tools._errors._classify_http_error
+# (auth_scope for 401, permission for 403 unless body says insufficient_scope,
+#  unknown for 422 — these are the project-wide labels, not vendor-specific).
 # ============================================================
 
 @pytest.mark.parametrize("code,kind", [
     (400, "bad_input"),
-    (401, "permission"),
-    (403, "permission"),
+    (401, "auth_scope"),    # 401 = token missing scope → user re-OAuth
+    (403, "permission"),    # 403 = token fine, ACL denies
     (404, "not_found"),
-    (422, "bad_input"),
+    (422, "unknown"),       # unprocessable entity isn't bad_input in this taxonomy
     (429, "rate_limit"),
     (500, "server"),
     (502, "server"),
@@ -53,6 +55,12 @@ def _make_http_error(code: int, body: bytes = b'{"err":"x"}'):
 ])
 def test_classify_maps_status_to_kind(code, kind):
     assert vh._classify(code) == kind
+
+
+def test_classify_403_with_insufficient_scope_body_maps_to_auth_scope():
+    """403 alone = ACL problem; but 403 + insufficient_scope in body means
+    the token literally lacks the scope — distinct fix path."""
+    assert vh._classify(403, "insufficient_scope: drive.readonly") == "auth_scope"
 
 
 # ============================================================
@@ -84,7 +92,7 @@ def test_get_json_passes_headers():
 
 
 @pytest.mark.parametrize("code,kind", [
-    (401, "permission"), (403, "permission"), (404, "not_found"),
+    (401, "auth_scope"), (403, "permission"), (404, "not_found"),
     (429, "rate_limit"), (500, "server"),
 ])
 def test_get_json_http_error_carries_error_kind(code, kind):

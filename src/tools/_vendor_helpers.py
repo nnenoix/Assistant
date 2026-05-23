@@ -7,7 +7,6 @@ account+vendor so multiple sellers/accounts can coexist.
 from __future__ import annotations
 
 import json
-import re
 import time
 import urllib.error
 import urllib.parse
@@ -16,19 +15,18 @@ from pathlib import Path
 from typing import Any
 
 from src.config import DATA_DIR
+from src.tools._safe_id import is_safe_id
 
 
 _TOKENS_DIR = DATA_DIR / "vendor_tokens"
 _TOKENS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Cache filenames concat `vendor` + `account_key` — both go straight into
-# the path. Whitelist to safe characters so a future caller passing
-# `vendor="../etc"` or `account_key="passwd"` can't escape the dir.
-_SAFE_CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
-
 
 def _safe_cache_key(vendor: str, account_key: str) -> bool:
-    return bool(_SAFE_CACHE_KEY_RE.match(vendor) and _SAFE_CACHE_KEY_RE.match(account_key))
+    """Cache filenames concat `vendor` + `account_key` — both go straight
+    into the path. Both halves must satisfy the same safe-id contract
+    used by MDM table names and the migration scanner."""
+    return is_safe_id(vendor) and is_safe_id(account_key)
 
 
 # ============================================================

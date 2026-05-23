@@ -36,6 +36,8 @@ import logging
 import urllib.error
 import urllib.request
 
+from src.tools._errors import _classify_exception, _classify_http_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,19 +107,17 @@ def check_for_updates(current_version: str, manifest_url: str,
         return {
             "ok": False,
             "error": f"HTTP {e.code}: {str(e)[:200]}",
-            "error_kind": (
-                "not_found" if e.code == 404
-                else "rate_limit" if e.code == 429
-                else "server" if e.code >= 500
-                else "bad_input"
-            ),
+            # Delegate to the project-wide classifier so the agent sees
+            # the same error_kind vocabulary as every other tool.
+            "error_kind": _classify_http_error(e.code, str(e)),
             "_meta": {"http_status": e.code, "manifest_url": manifest_url},
         }
     except (urllib.error.URLError, TimeoutError, OSError) as e:
+        kind, _ = _classify_exception(e)
         return {
             "ok": False,
             "error": f"network: {type(e).__name__}: {str(e)[:200]}",
-            "error_kind": "server",
+            "error_kind": kind,
             "_meta": {"http_status": None, "manifest_url": manifest_url},
         }
 
@@ -169,16 +169,15 @@ def get_current_version() -> str:
         return metadata.version("google-work-agent")
     except Exception:
         pass
-    # Fallback for `uv run` from a checkout — read pyproject.toml.
+    # Fallback for `uv run` from a checkout — read pyproject.toml via
+    # stdlib `tomllib` (Python 3.11+; pyproject.toml requires 3.11).
     try:
+        import tomllib
         from pathlib import Path
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
-        for line in pyproject.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("version") and "=" in line:
-                # version = "0.1.0"
-                value = line.split("=", 1)[1].strip().strip('"').strip("'")
-                return value
+        with open(pyproject, "rb") as f:
+            data = tomllib.load(f)
+        return data["project"]["version"]
     except Exception:
         pass
     return "0.0.0"

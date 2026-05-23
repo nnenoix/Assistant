@@ -114,38 +114,40 @@ def mount_mcp_http(app, *, path: str = "/mcp") -> None:
         _HANDLERS[_spec["name"]] = getattr(_wrapped, "handler", _wrapped)
         _SPECS[_spec["name"]] = _spec
 
+    # Pre-build the JSON-RPC tool-list response body once. GET /mcp gets
+    # hit on every LibreChat tab refresh; rebuilding 405 dicts per call
+    # is wasted work since TOOLS is frozen at mount time.
+    _DISCOVERY_TOOLS: list[dict] = [
+        {
+            "name": f"mcp__gworkagent__{t['name']}",
+            "description": t["schema"]["description"][:300],
+            "inputSchema": t["schema"]["input_schema"],
+            **(
+                {"annotations": {
+                    "readOnlyHint": t["annotations"].readOnlyHint,
+                    "destructiveHint": t["annotations"].destructiveHint,
+                    "idempotentHint": t["annotations"].idempotentHint,
+                    "openWorldHint": t["annotations"].openWorldHint,
+                }}
+                if t.get("annotations") else {}
+            ),
+        }
+        for t in TOOLS
+    ]
+    _DISCOVERY_BODY = {
+        "jsonrpc": "2.0",
+        "result": {"tools": _DISCOVERY_TOOLS, "count": len(_DISCOVERY_TOOLS)},
+    }
+
     @app.get(path)
     async def mcp_list_tools(request: Request) -> Response:
         """MCP discovery: GET /mcp returns the tool list as JSON-RPC."""
-        from src.tools.registry import TOOLS
-
         user, err = _authenticate(request)
         if err is not None:
             return err
         if user:
             request.state.user = user
-
-        tool_list = [
-            {
-                "name": f"mcp__gworkagent__{t['name']}",
-                "description": t["schema"]["description"][:300],
-                "inputSchema": t["schema"]["input_schema"],
-                **(
-                    {"annotations": {
-                        "readOnlyHint": t["annotations"].readOnlyHint,
-                        "destructiveHint": t["annotations"].destructiveHint,
-                        "idempotentHint": t["annotations"].idempotentHint,
-                        "openWorldHint": t["annotations"].openWorldHint,
-                    }}
-                    if t.get("annotations") else {}
-                ),
-            }
-            for t in TOOLS
-        ]
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "result": {"tools": tool_list, "count": len(tool_list)},
-        })
+        return JSONResponse(_DISCOVERY_BODY)
 
     @app.post(path)
     async def mcp_invoke(request: Request) -> Response:

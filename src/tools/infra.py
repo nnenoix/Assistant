@@ -8,26 +8,20 @@ team workflows without spinning up Postgres/Redis. Storage paths under
 from __future__ import annotations
 
 import json
-import re
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Table names land in filesystem paths under `.data/infra/mdm/<table>.json`.
-# Whitelist to a-z/0-9/_/-/. so a malicious caller can't escape via `..`,
-# slashes, NUL, drive letters, etc. Length-capped to avoid OS path limits.
-_SAFE_TABLE_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+from src.tools._safe_id import is_safe_id
 
 
 def _safe_table(table: str) -> str | None:
     """Return `table` if it's a safe identifier, else None. Callers turn
     None into a structured error — never construct a path from an
     unvalidated table name."""
-    if not isinstance(table, str) or not _SAFE_TABLE_RE.match(table):
-        return None
-    return table
+    return table if is_safe_id(table) else None
 
 from src.config import DATA_DIR
 

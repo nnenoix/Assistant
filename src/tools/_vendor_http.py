@@ -30,20 +30,19 @@ import json
 import urllib.error
 import urllib.request
 
+from src.tools._errors import _classify_http_error
 
-def _classify(code: int) -> str:
-    """HTTP status code → error_kind label. Matches the same vocabulary
-    `src.tools._errors._classify_http_error` uses so the agent doesn't
-    have to learn a separate dialect per vendor."""
-    if code in (401, 403):
-        return "permission"
-    if code == 404:
-        return "not_found"
-    if code == 429:
-        return "rate_limit"
-    if code >= 500:
-        return "server"
-    return "bad_input"
+
+def _classify(code: int, message: str = "") -> str:
+    """HTTP status code → error_kind label.
+
+    Delegates to `src.tools._errors._classify_http_error` so vendor
+    responses share the exact vocabulary used by Google API errors and
+    `_wrap_for_sdk`'s problem-envelope path. The earlier inline copy
+    diverged in subtle ways (401 → "permission" instead of the project's
+    "auth_scope"; 422 → "bad_input" vs. "unknown") — those drifts are
+    now eliminated."""
+    return _classify_http_error(code, message)
 
 
 def get_json(url: str, headers: dict | None = None, timeout: int = 60) -> dict:
@@ -59,10 +58,13 @@ def get_json(url: str, headers: dict | None = None, timeout: int = 60) -> dict:
                 "_meta": {"http_status": resp.status},
             }
     except urllib.error.HTTPError as e:
+        body = e.read()[:300].decode("utf-8", errors="replace")
         return {
             "ok": False,
-            "error": e.read()[:300].decode("utf-8", errors="replace"),
-            "error_kind": _classify(e.code),
+            "error": body,
+            # Pass body so 403+`insufficient_scope` correctly routes to
+            # `auth_scope` rather than the generic `permission` label.
+            "error_kind": _classify(e.code, body),
             "_meta": {"http_status": e.code},
         }
 
@@ -91,9 +93,10 @@ def post_json(url: str, body: dict, headers: dict | None = None,
                 "_meta": {"http_status": resp.status},
             }
     except urllib.error.HTTPError as e:
+        err_body = e.read()[:300].decode("utf-8", errors="replace")
         return {
             "ok": False,
-            "error": e.read()[:300].decode("utf-8", errors="replace"),
-            "error_kind": _classify(e.code),
+            "error": err_body,
+            "error_kind": _classify(e.code, err_body),
             "_meta": {"http_status": e.code},
         }

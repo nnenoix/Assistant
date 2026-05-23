@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -40,6 +41,11 @@ DB_PATH = DATA_DIR / "idempotency.sqlite"
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
+# Track the PID that opened the sqlite handle. arq workers + uvicorn
+# multi-worker setups fork the parent process — the inherited FD points
+# at the same WAL, and concurrent writes corrupt it. Re-open on PID
+# mismatch so each child process gets its own handle.
+_conn_pid: int | None = None
 
 
 def _has_tenant_column(conn: sqlite3.Connection) -> bool:
@@ -48,9 +54,16 @@ def _has_tenant_column(conn: sqlite3.Connection) -> bool:
 
 
 def _connect() -> sqlite3.Connection:
-    global _conn
-    if _conn is not None:
+    global _conn, _conn_pid
+    pid = os.getpid()
+    if _conn is not None and _conn_pid == pid:
         return _conn
+    if _conn is not None and _conn_pid != pid:
+        # Inherited handle from a fork — DO NOT call .close() on it
+        # (that would mess with the parent's WAL too). Just orphan it
+        # and reopen for our PID. The parent / sibling processes keep
+        # their own copies.
+        _conn = None
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None)
     conn.execute(
@@ -81,6 +94,7 @@ def _connect() -> sqlite3.Connection:
             ")"
         )
     _conn = conn
+    _conn_pid = pid
     return conn
 
 
@@ -160,8 +174,9 @@ def clear() -> int:
 
 def _reset_for_tests(tmp_path: Path) -> None:
     """Point the singleton at a tmp file. Tests only."""
-    global _conn, DB_PATH
+    global _conn, _conn_pid, DB_PATH
     if _conn is not None:
         _conn.close()
         _conn = None
+    _conn_pid = None
     DB_PATH = tmp_path / "idempotency.sqlite"

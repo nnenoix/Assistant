@@ -68,7 +68,13 @@ def _classify_exception(exc: Exception) -> tuple[str, int]:
     name = type(exc).__name__
     if name == "_IdempotencyConflict":
         return "idempotency_conflict", 0
-    if name in {"ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout", "TimeoutError"}:
+    if name in {
+        "ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout",
+        "TimeoutError",
+        # urllib network failures: DNS, refused, TLS handshake all wrap as URLError
+        "URLError",
+        "ConnectionRefusedError", "ConnectionResetError", "ConnectionAbortedError",
+    }:
         return "network", 0
     if name == "FileNotFoundError":
         return "not_found", 0
