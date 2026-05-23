@@ -1,19 +1,21 @@
 """Browser automation for Google APIs that don't have public access.
 
-Currently used for ONE thing: resolving spreadsheet → bound Apps Script ID.
-Drive/Apps Script/Drive Activity APIs all refuse to enumerate bound scripts;
-Google's web UI is the only authoritative source. We open `script.google.com/
-macros/d/<spreadsheet_id>/edit` in a real browser — Google redirects to the
-bound script editor (`script.google.com/d/<SCRIPT_ID>/edit`) — and we parse
-the final URL.
+Used for things Drive/Sheets/Apps Script APIs can't do:
+  - Resolving spreadsheet → bound Apps Script ID (`get_bound_script_id`)
+  - Switching an Apps Script project's GCP backing (`set_script_gcp_project`)
+  - Opening an arbitrary Drive link through a logged-in profile
+    (`drive_open` / `drive_list_folder`) — useful when a Drive share-link
+    is given but the agent's OAuth accounts don't have direct access.
 
-Persistent profile lives at `.data/browser_profile/`. First call is
-non-headless so the user can log in to Google once; subsequent calls reuse
-the saved session. After Playwright resolves an ID, the agent caches it in
-the bound-script registry, so Playwright fires at most once per spreadsheet.
+Persistent profile lives at `.data/browser_profiles/<profile>/`. First
+call should be non-headless so the user can log in to Google once;
+subsequent calls reuse the saved session. Different profiles can hold
+different Google identities (e.g. `default` for egor@..., `elena` for
+elena@...).
 """
 import re
 import time
+import urllib.parse
 from pathlib import Path
 
 from src.config import DATA_DIR
@@ -399,6 +401,364 @@ def set_script_gcp_project(
             "error": str(e)[:300],
             "exception_type": type(e).__name__,
             "_meta": {"error_kind": kind, "http_status": status},
+        }
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        pw.stop()
+
+
+# ============================================================
+# Drive UI fallback — when OAuth accounts can't reach a shared link
+# ============================================================
+# Use case: someone shared `https://drive.google.com/drive/folders/<ID>`
+# with a personal Google account that isn't OAuth-registered with the
+# agent. Browser automation through THAT account's logged-in profile is
+# the only way the agent can read those files. Tradeoff: slower, uses
+# UI which can break on Google A/B changes, harder to verify.
+
+
+_DRIVE_FOLDER_RE = re.compile(r"/drive/(?:u/\d+/)?folders/([A-Za-z0-9_\-]+)")
+_DRIVE_FILE_RE = re.compile(r"/file/(?:u/\d+/)?d/([A-Za-z0-9_\-]+)")
+_DOCS_RE = re.compile(r"docs\.google\.com/(document|spreadsheets|presentation|forms)/d/([A-Za-z0-9_\-]+)")
+
+
+def _parse_drive_url(url: str) -> dict:
+    """Extract kind + id from a Drive / Docs / Sheets / Slides URL.
+
+    Returns {kind, id} where kind ∈ {folder, file, document, spreadsheet,
+    presentation, forms, unknown} and id is the long alphanumeric token.
+    `unknown` means we couldn't recognize the URL shape — the caller can
+    still open it but won't get structured folder-listing parsing."""
+    m = _DRIVE_FOLDER_RE.search(url)
+    if m:
+        return {"kind": "folder", "id": m.group(1)}
+    m = _DRIVE_FILE_RE.search(url)
+    if m:
+        return {"kind": "file", "id": m.group(1)}
+    m = _DOCS_RE.search(url)
+    if m:
+        kind_map = {
+            "document": "document",
+            "spreadsheets": "spreadsheet",
+            "presentation": "presentation",
+            "forms": "forms",
+        }
+        return {"kind": kind_map[m.group(1)], "id": m.group(2)}
+    return {"kind": "unknown", "id": None}
+
+
+def drive_open(
+    url: str,
+    profile: str = "default",
+    headless: bool = True,
+    timeout_sec: int = 60,
+    capture_screenshot: bool = False,
+) -> dict:
+    """Open ANY Drive / Docs / Sheets / Slides URL through a logged-in
+    Playwright profile and report what the page actually shows.
+
+    Why this exists: a Drive share-link is just a string until you
+    open it as a human. Drive API obeys ACLs of the OAuth-authenticated
+    account; this tool obeys ACLs of whatever Google identity is logged
+    in to the `profile`. If a customer / friend shared a folder with
+    their elena@... account and you OAuth-registered egor@..., the
+    API path returns 404 — this path can reach it because the browser
+    profile is `elena@...`-logged-in.
+
+    First-time setup per profile:
+        browser_login_interactive(profile="elena")
+        # log in with elena@... in the popped window, leave it idle
+        # ~10s after redirect to myaccount.google.com — done.
+
+    Returns:
+        on success: {
+            ok: True,
+            parsed: {kind, id},      # what URL pointed at
+            resolved_url,            # final URL after redirects
+            title,                   # <title> tag content
+            access: "granted",
+            page_text_preview,       # first 1000 chars of innerText
+            screenshot_path?,        # only if capture_screenshot=True
+            took_ms, browser_channel
+        }
+        on access fail: {
+            ok: False, error_kind: "permission",
+            access: "login_required" | "permission_denied" | "not_found",
+            resolved_url, took_ms
+        }
+    """
+    t0 = time.time()
+    parsed = _parse_drive_url(url)
+
+    try:
+        pw, ctx, channel = _launch_persistent(headless=headless, profile=profile)
+    except Exception as e:
+        from src.tools._errors import _classify_exception
+        kind, _ = _classify_exception(e)
+        return {
+            "ok": False,
+            "error": f"browser launch failed: {str(e)[:200]}",
+            "error_kind": kind,
+            "_meta": {"profile": profile, "took_ms": int((time.time() - t0) * 1000)},
+        }
+
+    try:
+        page = ctx.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
+        except Exception as nav_err:
+            return {
+                "ok": False,
+                "error": f"navigation failed: {type(nav_err).__name__}: {str(nav_err)[:200]}",
+                "error_kind": "network",
+                "_meta": {"resolved_url": page.url, "took_ms": int((time.time() - t0) * 1000)},
+            }
+
+        # Give Drive UI a moment to settle — its SPA needs ~1-2s to populate.
+        page.wait_for_timeout(2000)
+        final_url = page.url
+
+        # Login redirect detection
+        if "accounts.google.com" in final_url or "ServiceLogin" in final_url:
+            return {
+                "ok": False,
+                "error": "redirected to Google login — profile not authenticated",
+                "error_kind": "auth_scope",
+                "access": "login_required",
+                "fix_hint": (
+                    f"call browser_login_interactive(profile={profile!r}) "
+                    "once in non-headless mode"
+                ),
+                "_meta": {
+                    "resolved_url": final_url,
+                    "profile": profile,
+                    "took_ms": int((time.time() - t0) * 1000),
+                },
+            }
+
+        # No-access detection: Drive renders a "Request access" / "You need
+        # access" interstitial. Title typically becomes "Доступ к ...".
+        title = (page.title() or "")[:300]
+        page_text = ""
+        try:
+            page_text = page.evaluate("() => document.body.innerText || ''")[:2000]
+        except Exception:
+            pass
+        if any(needle in page_text for needle in (
+            "You need access", "Request access",
+            "Запросить доступ", "Нужен доступ",
+            "Нет доступа", "доступа нет",
+        )):
+            return {
+                "ok": False,
+                "error": "page shows no-access interstitial",
+                "error_kind": "permission",
+                "access": "permission_denied",
+                "title": title,
+                "_meta": {
+                    "resolved_url": final_url,
+                    "profile": profile,
+                    "page_text_preview": page_text[:500],
+                    "took_ms": int((time.time() - t0) * 1000),
+                },
+            }
+
+        # 404-ish: "Sorry, the file you have requested does not exist"
+        if any(needle in page_text for needle in (
+            "does not exist", "не существует", "удалён", "deleted",
+        )) and parsed["kind"] != "unknown":
+            # Heuristic — could false-positive on a doc literally titled
+            # "things that deleted...". Caller can sanity-check.
+            return {
+                "ok": False,
+                "error": "page reports the resource doesn't exist",
+                "error_kind": "not_found",
+                "access": "not_found",
+                "title": title,
+                "_meta": {
+                    "resolved_url": final_url,
+                    "page_text_preview": page_text[:500],
+                    "took_ms": int((time.time() - t0) * 1000),
+                },
+            }
+
+        result: dict = {
+            "ok": True,
+            "parsed": parsed,
+            "resolved_url": final_url,
+            "title": title,
+            "access": "granted",
+            "page_text_preview": page_text[:1000],
+            "_meta": {
+                "profile": profile,
+                "browser_channel": channel,
+                "took_ms": int((time.time() - t0) * 1000),
+            },
+        }
+
+        if capture_screenshot:
+            shot_dir = DATA_DIR / "browser_screenshots"
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            shot_path = shot_dir / f"drive_{int(time.time())}.png"
+            try:
+                page.screenshot(path=str(shot_path), full_page=False)
+                result["screenshot_path"] = str(shot_path)
+            except Exception:
+                pass
+
+        return result
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        pw.stop()
+
+
+def drive_list_folder(
+    url: str,
+    profile: str = "default",
+    headless: bool = True,
+    timeout_sec: int = 60,
+    max_items: int = 200,
+) -> dict:
+    """Open a Drive folder URL and parse the list of child items from the UI.
+
+    Drive folder UI renders each child as a `<div data-id="<FILE_ID>">`
+    container with the title in `<div aria-label="<NAME>">`. We pull
+    these via `page.evaluate(...)` and return a structured list.
+
+    Returns:
+        on success: {ok: True, parsed, items: [{id, name, kind?}], ...}
+        on access fail: same shape as `drive_open`.
+
+    `kind` for each item is inferred from a CSS class hint Drive's UI
+    sets (`-folder`, `-document`, `-spreadsheet`, ...). May be `None`
+    if the hint isn't found — caller can re-open the item URL to find out.
+    """
+    parsed = _parse_drive_url(url)
+    if parsed["kind"] != "folder":
+        return {
+            "ok": False,
+            "error": f"URL is not a folder ({parsed['kind']}); use drive_open instead",
+            "error_kind": "bad_input",
+            "parsed": parsed,
+        }
+
+    t0 = time.time()
+    try:
+        pw, ctx, channel = _launch_persistent(headless=headless, profile=profile)
+    except Exception as e:
+        from src.tools._errors import _classify_exception
+        kind, _ = _classify_exception(e)
+        return {
+            "ok": False, "error": f"browser launch: {str(e)[:200]}",
+            "error_kind": kind, "_meta": {"profile": profile},
+        }
+
+    try:
+        page = ctx.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
+        page.wait_for_timeout(3000)  # SPA settle
+
+        if "accounts.google.com" in page.url:
+            return {
+                "ok": False, "error": "login required", "error_kind": "auth_scope",
+                "access": "login_required",
+                "fix_hint": f"browser_login_interactive(profile={profile!r})",
+                "_meta": {"profile": profile, "resolved_url": page.url},
+            }
+
+        # Wait for the file-list grid to render. Drive lazy-loads items —
+        # we scroll the container until count stops growing or max hit.
+        # Selector for grid item: `[data-id]` is stable.
+        try:
+            page.wait_for_selector("[data-id]", timeout=10000)
+        except Exception:
+            # No items selector ever appeared — could be empty folder OR
+            # access denied without the friendly interstitial. Check
+            # page text to decide.
+            text = page.evaluate("() => document.body.innerText || ''")[:500]
+            if any(n in text for n in ("Request access", "Запросить доступ", "Нужен доступ")):
+                return {
+                    "ok": False, "error": "permission denied", "error_kind": "permission",
+                    "access": "permission_denied",
+                    "_meta": {"resolved_url": page.url, "page_text_preview": text[:300]},
+                }
+            return {
+                "ok": True, "parsed": parsed, "items": [],
+                "resolved_url": page.url,
+                "_meta": {"reason": "no items selector appeared (empty folder?)",
+                          "profile": profile, "took_ms": int((time.time() - t0) * 1000)},
+            }
+
+        # Light scroll loop to surface lazy-loaded children.
+        last_count = -1
+        for _ in range(8):  # cap iterations
+            items = page.evaluate("() => document.querySelectorAll('[data-id]').length")
+            if items == last_count or items >= max_items:
+                break
+            last_count = items
+            page.mouse.wheel(0, 2000)
+            page.wait_for_timeout(700)
+
+        # Extract id + name + kind hint from the rendered nodes.
+        raw_items = page.evaluate("""(max) => {
+            const out = [];
+            const seen = new Set();
+            for (const el of document.querySelectorAll('[data-id]')) {
+                if (out.length >= max) break;
+                const id = el.getAttribute('data-id');
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                // Name candidates — Drive shifts these around between
+                // grid view and list view. Try a few selectors.
+                let name = '';
+                const ariaEl = el.querySelector('[aria-label]');
+                if (ariaEl) name = ariaEl.getAttribute('aria-label') || '';
+                if (!name) name = (el.innerText || '').split('\\n')[0].trim();
+                // Kind hint via class — `a-s-fa-Ha-pa` etc. obfuscated.
+                // Look for `[role=img]` aria-label which is the file-type icon.
+                let kind = null;
+                const img = el.querySelector('[role="img"][aria-label]');
+                if (img) {
+                    const lbl = (img.getAttribute('aria-label') || '').toLowerCase();
+                    if (lbl.includes('folder') || lbl.includes('папка')) kind = 'folder';
+                    else if (lbl.includes('sheet') || lbl.includes('таблиц')) kind = 'spreadsheet';
+                    else if (lbl.includes('doc') || lbl.includes('документ')) kind = 'document';
+                    else if (lbl.includes('slide') || lbl.includes('презентац')) kind = 'presentation';
+                    else if (lbl.includes('pdf')) kind = 'pdf';
+                    else if (lbl.includes('image') || lbl.includes('изображ')) kind = 'image';
+                }
+                out.push({id, name, kind});
+            }
+            return out;
+        }""", max_items)
+
+        return {
+            "ok": True,
+            "parsed": parsed,
+            "resolved_url": page.url,
+            "items": raw_items,
+            "_meta": {
+                "profile": profile,
+                "browser_channel": channel,
+                "count": len(raw_items),
+                "truncated": len(raw_items) >= max_items,
+                "took_ms": int((time.time() - t0) * 1000),
+            },
+        }
+    except Exception as e:
+        from src.tools._errors import _classify_exception
+        kind, status = _classify_exception(e)
+        return {
+            "ok": False, "error": str(e)[:300],
+            "exception_type": type(e).__name__,
+            "_meta": {"error_kind": kind, "http_status": status,
+                      "took_ms": int((time.time() - t0) * 1000)},
         }
     finally:
         try:

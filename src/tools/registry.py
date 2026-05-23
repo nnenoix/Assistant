@@ -2813,6 +2813,43 @@ TOOLS = [
             "required": ["script_id", "project_number"],
         },
     ),
+    # --- Drive UI fallback: open shared link through logged-in profile ---
+    _tool(
+        "drive_browser_open",
+        browser.drive_open,
+        "drive.read",
+        "Open any Drive/Docs/Sheets/Slides URL through a logged-in Playwright profile. USE WHEN: a Drive share-link came from someone whose Google account is NOT one of the agent's OAuth-registered accounts (so Drive API returns 404/403), but the user has access to that account in their browser. First-time per profile: call browser_login_interactive(profile='<name>') in headless=False mode. Returns {parsed:{kind,id}, resolved_url, title, access:'granted'|'login_required'|'permission_denied'|'not_found', page_text_preview}. For folder URLs use drive_browser_list_folder to get child items.",
+        {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full Drive/Docs URL (folder, file, sheet, doc, slide, form)."},
+                "profile": {"type": "string", "default": "default", "description": "Browser profile alias (matches a logged-in Google identity)."},
+                "headless": {"type": "boolean", "default": True},
+                "timeout_sec": {"type": "integer", "default": 60},
+                "capture_screenshot": {"type": "boolean", "default": False},
+            },
+            "required": ["url"],
+        },
+        category="drive",
+    ),
+    _tool(
+        "drive_browser_list_folder",
+        browser.drive_list_folder,
+        "drive.read",
+        "Parse the child items out of a Drive folder URL by walking the rendered DOM. USE INSTEAD of `drive_list_files` when the folder is shared with an account that's not OAuth-registered (drive_browser_open returns access:'granted' but the API can't see it). Returns {items: [{id, name, kind}], parsed, _meta:{count, truncated}}. Lazy-loads via scroll up to `max_items`.",
+        {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Drive folder URL like https://drive.google.com/drive/folders/<ID>."},
+                "profile": {"type": "string", "default": "default"},
+                "headless": {"type": "boolean", "default": True},
+                "timeout_sec": {"type": "integer", "default": 60},
+                "max_items": {"type": "integer", "default": 200},
+            },
+            "required": ["url"],
+        },
+        category="drive",
+    ),
     # --- GCP API enable + project listing ---
     _tool(
         "gcp_enable_api",
