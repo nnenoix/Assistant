@@ -1,0 +1,29 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: workspace-agent
+  namespace: workspace-agent
+  annotations:
+    # nginx-ingress — adjust to your controller (traefik, istio, …)
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    # cert-manager — drop the annotation if you handle TLS elsewhere
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - agent.example.com   # ← edit me
+      secretName: workspace-agent-tls
+  rules:
+    - host: agent.example.com  # ← edit me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: workspace-agent
+                port:
+                  name: http

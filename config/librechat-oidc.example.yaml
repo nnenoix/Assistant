@@ -1,0 +1,80 @@
+# LibreChat config for shared OIDC SSO with the Workspace Agent.
+#
+# When the agent + LibreChat share the same Authentik (or Keycloak, or
+# any OIDC IdP), end users log in to LibreChat once and their JWT is
+# forwarded to the agent's `/mcp` endpoint via the
+# `${LIBRECHAT_USER_TOKEN}` placeholder. Per-user RBAC then applies on
+# the agent side — no service-account bearer needed.
+#
+# This is the recommended deployment over `librechat.example.yaml`
+# (which uses a single service account) once you have more than a
+# handful of users.
+#
+# https://www.librechat.ai/docs/configuration/authentication/OAuth2-OIDC
+# https://www.librechat.ai/docs/configuration/librechat_yaml/object_structure/mcp_servers
+
+version: 1.2.0
+
+# ============================================================
+# OIDC: LibreChat uses the SAME Authentik realm as the agent
+# ============================================================
+#
+# Required Authentik setup (one-time):
+#   1. Create an OAuth2/OpenID Provider in Authentik with:
+#         - Client type:        Confidential
+#         - Redirect URIs:      https://librechat.example.com/oauth/openid/callback
+#         - Scopes:             openid profile email groups
+#         - Signing key:        same key the agent verifies against
+#         - Issuer:             $OIDC_ISSUER on the agent side
+#   2. Create an Application bound to the Provider above.
+#   3. Optionally bind a group policy so only members of `agent-users`
+#      can sign in.
+#
+# Pass the Provider's client_id + client_secret to LibreChat via env:
+#   LIBRECHAT_OIDC_CLIENT_ID=...
+#   LIBRECHAT_OIDC_CLIENT_SECRET=...
+#   LIBRECHAT_OIDC_ISSUER=http://authentik:9000/application/o/workspace-agent/
+#
+# (LibreChat reads these directly from the environment; no extra wiring
+# in this file is needed beyond `openidConnect: { enabled: true }`.)
+#
+# How user tokens reach the agent: LibreChat exposes the verified
+# OIDC access_token as `LIBRECHAT_USER_TOKEN` inside MCP header
+# templates (see `mcpServers.workspace-agent.headers` below).
+
+openidConnect:
+  enabled: true
+  # Disable username/password to prevent the OIDC bypass surface.
+  registration: false
+  socialLogins: ["openid"]
+
+# ============================================================
+# MCP server: agent receives the END USER's JWT, not a service account
+# ============================================================
+
+mcpServers:
+  workspace-agent:
+    type: streamable-http
+    url: http://workspace-agent:8765/mcp
+    timeout: 60000
+    headers:
+      # ${LIBRECHAT_USER_TOKEN} expands to the signed OIDC access_token
+      # of the user who initiated the chat. The agent's `_authenticate`
+      # helper verifies signature + audience + expiry against the same
+      # JWKS the IdP publishes.
+      Authorization: "Bearer ${LIBRECHAT_USER_TOKEN}"
+      # X-Tenant-Id is informational only when OIDC carries `tenant`
+      # claim; left here for explicit override during dev.
+      X-Tenant-Id: "${TENANT_ID:-default}"
+    allowedTools:
+      - mcp__gworkagent__sheets_summarize
+      - mcp__gworkagent__sheets_query
+      - mcp__gworkagent__sheets_metric_lookup
+      - mcp__gworkagent__drive_search
+      - mcp__gworkagent__gmail_search
+      - mcp__gworkagent__calendar_list_events
+      - mcp__gworkagent__wb_stocks_v2
+      - mcp__gworkagent__wb_orders_recent
+      - mcp__gworkagent__ozon_check_credentials
+      - mcp__gworkagent__moysklad_profit_byproduct
+      - mcp__gworkagent__report_render_markdown

@@ -1,0 +1,86 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: workspace-agent
+  namespace: workspace-agent
+  labels:
+    app: workspace-agent
+  annotations:
+    # Prometheus-operator-style scrape annotation. Plain Prometheus
+    # picks it up via the kubernetes_sd_config + relabel rule in
+    # config/prometheus.yml.
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8765"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: workspace-agent
+  ports:
+    - name: http
+      port: 8765
+      targetPort: 8765
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workspace-agent
+  namespace: workspace-agent
+  labels:
+    app: workspace-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workspace-agent
+  strategy:
+    # Single-replica = no rolling restart space; recreate is cleaner.
+    # Move to RollingUpdate when replicas > 1.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: workspace-agent
+    spec:
+      containers:
+        - name: agent
+          image: workspace-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8765
+          envFrom:
+            - configMapRef:
+                name: workspace-agent-config
+            - secretRef:
+                name: workspace-agent-secrets
+          # Compose POSTGRES_DSN from the parts the ConfigMap + Secret
+          # provide. The image's entrypoint reads PG_DSN.
+          env:
+            - name: PG_DSN
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)"
+            - name: REDIS_DSN
+              value: "redis://$(REDIS_HOST):$(REDIS_PORT)/0"
+          resources:
+            requests: { memory: "256Mi", cpu: "100m" }
+            limits:   { memory: "1Gi",   cpu: "2000m" }
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          # Drop privileges — the image runs as non-root by default,
+          # but enforce here for any sidecar that gets bolted on later.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # PyInstaller temp extracts
+            capabilities:
+              drop: ["ALL"]

@@ -69,6 +69,10 @@ curl -X POST http://localhost:8765/mcp \
 
 ## 5. Wire LibreChat (optional)
 
+### 5a. Quick start — service-account bearer
+
+For a single-user setup or a quick demo:
+
 ```bash
 git clone https://github.com/danny-avila/LibreChat.git
 cd LibreChat
@@ -78,6 +82,41 @@ docker compose up -d
 # Visit http://localhost:3080 — log in, the workspace-agent tools should
 # show up in the MCP servers dropdown.
 ```
+
+### 5b. Production — shared OIDC SSO (recommended)
+
+When the agent + LibreChat share the same Authentik (or Keycloak), end
+users log in to LibreChat once and their verified JWT is forwarded to
+the agent's `/mcp` endpoint. Per-user RBAC then applies on the agent
+side — no service-account bearer needed.
+
+```bash
+# 1. In Authentik:
+#    - Create an OAuth2/OpenID Provider (Client type: Confidential)
+#    - Redirect URI:  https://librechat.example.com/oauth/openid/callback
+#    - Scopes:        openid profile email groups
+#    - Issuer / signing key: SAME as the agent's OIDC_ISSUER
+#    - Create an Application bound to the Provider
+#    - (Optional) Group-bind to restrict to `agent-users` group
+#
+# 2. Export the Provider's credentials:
+export LIBRECHAT_OIDC_CLIENT_ID=...
+export LIBRECHAT_OIDC_CLIENT_SECRET=...
+export LIBRECHAT_OIDC_ISSUER=http://authentik:9000/application/o/workspace-agent/
+
+# 3. Wire LibreChat with the OIDC example config:
+cp ../workspace-agent/config/librechat-oidc.example.yaml ./librechat.yaml
+docker compose up -d
+```
+
+User flow on the agent side:
+- LibreChat → user signs in via Authentik
+- LibreChat → forwards `Authorization: Bearer <user's OIDC token>` to `/mcp`
+- Agent `_authenticate` verifies signature + audience + expiry against
+  Authentik's JWKS (`OIDC_JWKS_URL`)
+- Agent's RBAC + per-tenant idempotency cache use the claims directly
+  — every audit-log row carries the real user's `sub`, not a shared
+  service-account placeholder.
 
 ## 6. Observability
 
@@ -185,6 +224,14 @@ Exit codes: 0=clean, 1=errors logged in report, 2=refused.
   `opentelemetry-api` isn't installed.
   (`service.trace_span_log` JSONL stub kept for offline replay.)
 - ЮKassa cert rotation automation (cert is published, need polling)
-- LibreChat OIDC SSO integration (currently uses service-account Bearer token)
-- Helm chart / Kubernetes manifests for non-Docker deploys
+- ~~LibreChat OIDC SSO integration~~ — **DONE.** See section 5b above
+  + `config/librechat-oidc.example.yaml`. End users sign in via the
+  same Authentik that secures the agent; their JWT is forwarded to
+  `/mcp` so per-user RBAC + audit attribution apply.
+- ~~Kubernetes manifests for non-Docker deploys~~ — **DONE.** Minimal
+  single-replica set in `deploy/k8s/` (namespace, configmap, secret
+  template, postgres StatefulSet, redis Deployment, agent Deployment +
+  Service with Prometheus scrape annotations, ingress). See
+  `deploy/k8s/README.md`. Helm chart still a followup.
+- Helm chart with values.yaml + templates/ (HA / multi-replica)
 - Real CRDs for multi-tenant scaling
