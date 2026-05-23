@@ -11,34 +11,10 @@ Most users only need read access: «какие документы пришли»
 from __future__ import annotations
 
 import json
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any
 
-
-def _get_json(url: str, headers: dict | None = None, timeout: int = 60) -> dict:
-    req = urllib.request.Request(url, headers=headers or {}, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return {"ok": True, "data": json.loads(resp.read().decode("utf-8")),
-                    "_meta": {"http_status": resp.status}}
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "error": e.read()[:300].decode("utf-8", errors="replace"),
-                "_meta": {"http_status": e.code}}
-
-
-def _post_json(url: str, body: dict, headers: dict | None = None, timeout: int = 60) -> dict:
-    h = {"Content-Type": "application/json", "Accept": "application/json", **(headers or {})}
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
-                                 method="POST", headers=h)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return {"ok": True, "data": json.loads(resp.read().decode("utf-8")),
-                    "_meta": {"http_status": resp.status}}
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "error": e.read()[:300].decode("utf-8", errors="replace"),
-                "_meta": {"http_status": e.code}}
+from src.tools._vendor_http import get_json as _get_json, post_json as _post_json
 
 
 # ============================================================
