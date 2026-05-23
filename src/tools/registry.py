@@ -16,7 +16,7 @@ from src.tools import (
     aliases, analytics, analytics_local, apps_script, apps_script_api,
     bank_parser, browser, calendar, chats, cloud_logging, contacts, docs,
     drive, edo, excel, external, file_analyze, file_extract, forms, gcp,
-    gmail, infra, local_fs, logistics, macros, messaging, mlhelpers,
+    gmail, infra, knowledge, local_fs, logistics, macros, messaging, mlhelpers,
     moysklad, notes, onec, ozon, payments, pdf_gen, reply_check, reports,
     self_heal, service, sheets, slides, social,
     tasks as gtasks, translation, verify, vision, watcher, wb, web, yamarket,
@@ -2987,6 +2987,67 @@ TOOLS = [
         "chats.read",
         "Semantic search across saved chats (local embeddings). Better than chats_search for fuzzy queries ('налоги' matches 'НДС'). Falls back to substring if embedding model unavailable; `_meta.search_method` flags which.",
         {"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["query"]},
+    ),
+    # --- Knowledge base (read once, recall forever — across chats) ---
+    _tool(
+        "knowledge_save",
+        knowledge.save,
+        "notes.write",
+        "Save a chunk of text to the local knowledge base — text you read from a web page, doc, dataset that you'll want to recall later (in this chat or future ones). **USE PROACTIVELY** when the user says 'сохрани локально для анализа', 'запомни это', 'потом будем это использовать', or whenever you just fetched substantial content from a URL / file that's worth keeping. The text is encoded into a local embeddings store; `knowledge_search` later finds it by meaning, not just keywords. Pass `source` (the canonical URL / file_id / path), optional `title` (human label), and `tags` (free-form labels for filtering — e.g. ['wildberries', 'продвижение']). Idempotent — saving the same source+text twice does nothing.",
+        {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The content to save. Up to 200 KB per entry; split larger sources."},
+                "source": {"type": "string", "description": "Canonical pointer: URL, Drive file id, absolute path."},
+                "title": {"type": "string", "description": "Human-readable label for search results."},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Free-form labels. Max 20."},
+                "scope": {"type": "string", "description": "Namespace; default 'knowledge'. Use separate scopes only when you want hard isolation."},
+            },
+            "required": ["text", "source"],
+        },
+    ),
+    _tool(
+        "knowledge_search",
+        knowledge.search,
+        "notes.read",
+        "Semantic search across saved knowledge. **CHECK THIS FIRST** when the user asks about something they previously had you read or save — 'что ты узнал про X', 'найди в сохранённом про Y', 'мы это уже разбирали — что там было'. Returns top-k hits with title, source URL, tags, 300-char snippet. Use `tag_filter` to narrow to a known label set. Falls back to substring search when the embedding model isn't loaded (`_meta.search_method` says which).",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "top_k": {"type": "integer", "description": "Default 8."},
+                "scope": {"type": "string", "description": "Default 'knowledge'."},
+                "tag_filter": {"type": "array", "items": {"type": "string"}, "description": "Only entries with ALL listed tags pass."},
+            },
+            "required": ["query"],
+        },
+    ),
+    _tool(
+        "knowledge_list_sources",
+        knowledge.list_sources,
+        "notes.read",
+        "List distinct sources currently saved in the knowledge base, newest first. Use to refresh your memory at the start of a session ('что я уже сохранял?') or to find a specific URL the user previously asked about.",
+        {
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "description": "Default 'knowledge'."},
+                "limit": {"type": "integer", "description": "Default 50."},
+            },
+        },
+    ),
+    _tool(
+        "knowledge_delete",
+        knowledge.delete,
+        "notes.write",
+        "Remove a single saved entry by its `key`. Useful to forget outdated content the user no longer wants. The key comes from `knowledge_save`'s response or from `knowledge_list_sources`.",
+        {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "scope": {"type": "string", "description": "Default 'knowledge'."},
+            },
+            "required": ["key"],
+        },
     ),
     # --- Notes (persistent agent memory across sessions) ---
     _tool(
