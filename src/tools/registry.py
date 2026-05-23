@@ -12,6 +12,7 @@ from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
 
 from src import auth
 from src.tools import (
+    _idempotency, _quota,
     aliases, analytics, analytics_local, apps_script, apps_script_api,
     bank_parser, browser, calendar, chats, cloud_logging, contacts, docs,
     drive, edo, excel, external, file_analyze, file_extract, forms, gcp,
@@ -22,6 +23,18 @@ from src.tools import (
 )
 # `tasks` aliased to gtasks because the bare name collides with pytest's
 # internal `tasks` discovery in some contexts. Use gtasks.* throughout.
+
+# Optional OpenTelemetry trace API — falls back to `None` when the package
+# isn't installed so `_wrap_for_sdk`'s hot path stays lazy-import free.
+try:
+    from opentelemetry import trace as _otel_trace  # type: ignore
+except Exception:  # pragma: no cover — opentelemetry not installed
+    _otel_trace = None
+
+# Prometheus-format metrics. Always available — the module has zero
+# external dependencies. Hooked at the tool wrapper's finally block so
+# every invocation increments call counters and the latency histogram.
+from src import metrics as _metrics
 
 
 MCP_SERVER_NAME = "gworkagent"
@@ -4216,12 +4229,12 @@ def _wrap_for_sdk(spec):
         # show end-to-end agent → tool → upstream API behaviour in Langfuse
         # / Phoenix / Jaeger.
         _otel_span = None
-        try:
-            from opentelemetry import trace as _otel_trace
-            _otel_span = _otel_trace.get_tracer("workspace_agent").start_as_current_span(f"tool.{name}")
-            _otel_span.__enter__()
-        except Exception:
-            _otel_span = None
+        if _otel_trace is not None:
+            try:
+                _otel_span = _otel_trace.get_tracer("workspace_agent").start_as_current_span(f"tool.{name}")
+                _otel_span.__enter__()
+            except Exception:
+                _otel_span = None
         _started = asyncio.get_event_loop().time()
         # Dry-run gate. If the tool's destructive AND the caller asked for a
         # preview, either pass through (native impl) or return a stub
@@ -4258,8 +4271,7 @@ def _wrap_for_sdk(spec):
         # non-idempotent at registration, and (b) the caller supplied a key.
         idempotency_key = args.pop("idempotency_key", None) if supports_idempotency else None
         if idempotency_key:
-            from src.tools import _idempotency as _idem
-            cached = await asyncio.to_thread(_idem.lookup, idempotency_key, name, args)
+            cached = await asyncio.to_thread(_idempotency.lookup, idempotency_key, name, args)
             if cached.get("hit"):
                 if cached.get("mismatch"):
                     # Synthetic exception just to reuse _build_problem's
@@ -4283,11 +4295,14 @@ def _wrap_for_sdk(spec):
         # tools without a configured bucket.
         paced_ms = 0.0
         if bucket:
-            from src.tools import _quota as _q
-            paced_ms = await asyncio.to_thread(_q.acquire, bucket)
+            paced_ms = await asyncio.to_thread(_quota.acquire, bucket)
+        # Track outcome so the `finally` block can emit a single metrics
+        # record. Mutated by the success branch + the exception branch.
+        outcome: dict[str, Any] = {"ok": False, "error_kind": None}
         try:
             result = await asyncio.to_thread(fn, **args)
             if result is None:
+                outcome["ok"] = True
                 return {"content": [{"type": "text", "text": "(no output)"}]}
             # Surface quota signal on existing _meta dict (don't synthesize
             # one — many tools deliberately return non-dict results)
@@ -4296,8 +4311,7 @@ def _wrap_for_sdk(spec):
                 if isinstance(meta, dict):
                     if paced_ms > 0:
                         meta["quota_paced_ms"] = paced_ms
-                    from src.tools import _quota as _q
-                    rem = _q.remaining_pct(bucket)
+                    rem = _quota.remaining_pct(bucket)
                     if rem is not None:
                         meta["quota_remaining_pct"] = round(rem, 3)
             payload = json.dumps(result, default=str, ensure_ascii=False)
@@ -4310,11 +4324,12 @@ def _wrap_for_sdk(spec):
             # Cache successful responses for replay on retry with same key.
             # Errors are NOT cached — we want the next retry to re-attempt.
             if idempotency_key:
-                from src.tools import _idempotency as _idem
-                await asyncio.to_thread(_idem.store, idempotency_key, name, args, response)
+                await asyncio.to_thread(_idempotency.store, idempotency_key, name, args, response)
+            outcome["ok"] = True
             return response
         except Exception as e:
             problem = _build_problem(e, name)
+            outcome["error_kind"] = (problem.get("_meta") or {}).get("error_kind")
             payload = json.dumps(problem, ensure_ascii=False)
             return {
                 "content": [{"type": "text", "text": payload}],
@@ -4326,6 +4341,18 @@ def _wrap_for_sdk(spec):
                     _otel_span.__exit__(None, None, None)
                 except Exception:
                     pass
+            # Record metrics regardless of outcome. Latency is wall-clock
+            # ms from the start of the wrapped call (covers quota pacing
+            # + idempotency lookup + the actual tool body).
+            try:
+                latency_ms = (asyncio.get_event_loop().time() - _started) * 1000.0
+                _metrics.record_tool_call(
+                    name, latency_ms,
+                    ok=outcome["ok"], error_kind=outcome["error_kind"],
+                )
+            except Exception:
+                # Metrics must never break a tool call.
+                pass
     return wrapped
 
 

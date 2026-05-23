@@ -157,7 +157,9 @@ migrate to Postgres for multi-instance / multi-tenant deployment:
 ## 9. Known followups (intentionally NOT in this scaffolding)
 
 - `scripts/migrate_jsonl_to_pg` migration script
-- `metrics_path: /metrics` on the FastAPI app (needs `prometheus-fastapi-instrumentator`)
+- ~~`metrics_path: /metrics` on the FastAPI app~~ — **DONE.** Zero-dep
+  Prometheus text emission via `src/metrics.py`; `_wrap_for_sdk`
+  populates per-tool call counters + latency histogram.
 - Real OTel instrumentation in tool wrappers (currently only `service.trace_span_log` jsonl-stub)
 - ЮKassa cert rotation automation (cert is published, need polling)
 - LibreChat OIDC SSO integration (currently uses service-account Bearer token)

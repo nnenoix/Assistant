@@ -17,8 +17,11 @@ scrape_configs:
   - job_name: workspace-agent
     static_configs:
       - targets: ["agent:8765"]
-    metrics_path: /metrics  # NB: not yet wired — needs prometheus_client
-                            # mounted under FastAPI. Track in followups.
+    metrics_path: /metrics  # Served by src/metrics.py (zero-dep
+                            # Prometheus text emission). Exposes:
+                            #   workspace_agent_tool_calls_total{name,status}
+                            #   workspace_agent_tool_errors_total{name,error_kind}
+                            #   workspace_agent_tool_latency_ms histogram
     relabel_configs:
       - source_labels: [__address__]
         target_label: instance

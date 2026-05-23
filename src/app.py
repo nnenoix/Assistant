@@ -130,6 +130,18 @@ except Exception as _e:
     logging.getLogger(__name__).warning(f"MCP HTTP mount failed: {_e}")
 
 
+# Phase 0: /metrics for Prometheus scrape. Zero deps — text exposition is
+# emitted by hand. config/prometheus.yml already targets this path. The
+# counters are populated by `src.tools.registry._wrap_for_sdk` whenever
+# the agent invokes a tool.
+try:
+    from src.metrics import mount_metrics
+    mount_metrics(app)
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).warning(f"metrics mount failed: {_e}")
+
+
 @app.middleware("http")
 async def _origin_gate(request, call_next):
     """Reject state-changing requests with a cross-origin `Origin` header.
