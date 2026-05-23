@@ -183,3 +183,95 @@ def test_wrap_for_sdk_does_not_cache_errors():
     assert r1.get("is_error") is True
     assert r2.get("is_error") is not True
     assert state["calls"] == 2
+
+
+# ---------- SEC M1: tenant isolation ----------
+
+def _with_tenant(name, fn):
+    """Run `fn()` with current_tenant_id() bound to `name`."""
+    from src.tenancy import _current_tenant
+    token = _current_tenant.set(name)
+    try:
+        return fn()
+    finally:
+        _current_tenant.reset(token)
+
+
+def test_lookup_isolates_across_tenants():
+    """SEC M1: tenant A's cached response must NOT be visible from tenant B
+    under the same key + tool, even with identical args."""
+    _with_tenant("alpha", lambda: idem.store(
+        "shared-key", "tool_x", {"a": 1}, {"content": [{"type": "text", "text": "alpha-only"}]}
+    ))
+    miss_for_beta = _with_tenant("beta", lambda: idem.lookup(
+        "shared-key", "tool_x", {"a": 1}
+    ))
+    hit_for_alpha = _with_tenant("alpha", lambda: idem.lookup(
+        "shared-key", "tool_x", {"a": 1}
+    ))
+    assert miss_for_beta == {"hit": False}
+    assert hit_for_alpha["hit"] is True
+    assert hit_for_alpha["response"]["content"][0]["text"] == "alpha-only"
+
+
+def test_mismatch_does_not_leak_across_tenants():
+    """If tenant A populated `key` with args {a:1}, tenant B calling `key`
+    with args {a:2} must NOT see a mismatch error (that would let B
+    confirm A used the key)."""
+    _with_tenant("alpha", lambda: idem.store(
+        "guessable", "tool_x", {"a": 1}, {"r": "alpha"}
+    ))
+    r = _with_tenant("beta", lambda: idem.lookup(
+        "guessable", "tool_x", {"a": 2}
+    ))
+    # Confidentiality: B sees a clean miss, not a mismatch-flag that
+    # would reveal A used this key.
+    assert r == {"hit": False}
+
+
+def test_store_does_not_overwrite_other_tenant():
+    """Tenant B writing under a key that A also used must not clobber A's
+    cached response."""
+    _with_tenant("alpha", lambda: idem.store(
+        "same-key", "tool_x", {"a": 1}, {"r": "alpha"}
+    ))
+    _with_tenant("beta", lambda: idem.store(
+        "same-key", "tool_x", {"a": 1}, {"r": "beta"}
+    ))
+    a = _with_tenant("alpha", lambda: idem.lookup(
+        "same-key", "tool_x", {"a": 1}
+    ))
+    b = _with_tenant("beta", lambda: idem.lookup(
+        "same-key", "tool_x", {"a": 1}
+    ))
+    assert a["response"]["r"] == "alpha"
+    assert b["response"]["r"] == "beta"
+
+
+def test_legacy_db_without_tenant_column_is_migrated(tmp_path, monkeypatch):
+    """SEC M1: a sqlite file created by an older release (no tenant_id
+    column) should be auto-rebuilt at open time — the 24h TTL makes the
+    migration loss acceptable."""
+    # Hand-build the OLD schema, populate it, then re-point _idempotency.
+    import sqlite3
+    legacy_path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(str(legacy_path), isolation_level=None)
+    conn.execute(
+        "CREATE TABLE idempotency ("
+        " key TEXT NOT NULL, tool TEXT NOT NULL,"
+        " args_hash TEXT NOT NULL, response_json TEXT NOT NULL,"
+        " created_at REAL NOT NULL, PRIMARY KEY (key, tool))"
+    )
+    conn.execute(
+        "INSERT INTO idempotency VALUES ('legacy-key', 'tool_x', 'h', '{}', 0.0)"
+    )
+    conn.close()
+
+    monkeypatch.setattr(idem, "DB_PATH", legacy_path)
+    monkeypatch.setattr(idem, "_conn", None)
+
+    # First call after the upgrade must NOT crash on the missing column.
+    out = idem.lookup("legacy-key", "tool_x", {})
+    assert out["hit"] is False  # row was dropped during the rebuild
+    # And the schema now has the tenant column
+    assert idem._has_tenant_column(idem._connect())

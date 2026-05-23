@@ -11,6 +11,11 @@ Storage: a single sqlite file at ``.data/idempotency.sqlite``. Thread-safe
 via process-level lock. Off when no key is provided — preserves existing
 behaviour for callers that don't opt in.
 
+Multi-tenant: rows are keyed by `(tenant_id, key, tool)` so a malicious
+caller can't poison or read another tenant's cache by guessing an
+idempotency key. The tenant is resolved from `src.tenancy.current_tenant_id()`
+at lookup/store time — no signature change required at the call site.
+
 Reference: Stripe's «Designing robust and predictable APIs with
 idempotency» (2017). Same args + same key → cached. Same key + different
 args → error (idempotency-key reused with different payload).
@@ -26,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from src.config import DATA_DIR
+from src.tenancy import current_tenant_id
 
 
 DEFAULT_TTL_S = 24 * 60 * 60  # 24 hours
@@ -36,6 +42,11 @@ _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 
 
+def _has_tenant_column(conn: sqlite3.Connection) -> bool:
+    cols = conn.execute("PRAGMA table_info(idempotency)").fetchall()
+    return any(c[1] == "tenant_id" for c in cols)
+
+
 def _connect() -> sqlite3.Connection:
     global _conn
     if _conn is not None:
@@ -44,14 +55,31 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS idempotency ("
+        " tenant_id TEXT NOT NULL DEFAULT 'default',"
         " key TEXT NOT NULL,"
         " tool TEXT NOT NULL,"
         " args_hash TEXT NOT NULL,"
         " response_json TEXT NOT NULL,"
         " created_at REAL NOT NULL,"
-        " PRIMARY KEY (key, tool)"
+        " PRIMARY KEY (tenant_id, key, tool)"
         ")"
     )
+    # Live-migration for stores created before the tenant column existed.
+    # Rather than ALTER TABLE (which would force a PK rebuild anyway in
+    # sqlite), drop the cache: it's a 24h TTL store, callers retry safely.
+    if not _has_tenant_column(conn):
+        conn.execute("DROP TABLE idempotency")
+        conn.execute(
+            "CREATE TABLE idempotency ("
+            " tenant_id TEXT NOT NULL DEFAULT 'default',"
+            " key TEXT NOT NULL,"
+            " tool TEXT NOT NULL,"
+            " args_hash TEXT NOT NULL,"
+            " response_json TEXT NOT NULL,"
+            " created_at REAL NOT NULL,"
+            " PRIMARY KEY (tenant_id, key, tool)"
+            ")"
+        )
     _conn = conn
     return conn
 
@@ -69,16 +97,19 @@ def lookup(key: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
     - hit=True + response: serve from cache; do NOT re-execute the tool.
     - hit=True + mismatch=True: same key was used with different args — abort.
     - hit=False: caller proceeds with normal execution then calls `store()`.
+
+    Looks up under the current request's tenant — see module docstring.
     """
     if not key:
         return {"hit": False}
+    tenant = current_tenant_id()
     args_hash = _hash_args(args)
     with _lock:
         conn = _connect()
         row = conn.execute(
             "SELECT args_hash, response_json, created_at FROM idempotency "
-            "WHERE key = ? AND tool = ?",
-            (key, tool),
+            "WHERE tenant_id = ? AND key = ? AND tool = ?",
+            (tenant, key, tool),
         ).fetchone()
     if row is None:
         return {"hit": False}
@@ -101,9 +132,10 @@ def lookup(key: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def store(key: str, tool: str, args: dict[str, Any], response: dict[str, Any]) -> None:
-    """Persist `response` keyed by (key, tool). No-op when `key` is empty."""
+    """Persist `response` keyed by (tenant, key, tool). No-op when `key` is empty."""
     if not key:
         return
+    tenant = current_tenant_id()
     args_hash = _hash_args(args)
     response_json = json.dumps(response, ensure_ascii=False, default=str)
     now = time.time()
@@ -111,9 +143,9 @@ def store(key: str, tool: str, args: dict[str, Any], response: dict[str, Any]) -
         conn = _connect()
         conn.execute(
             "INSERT OR REPLACE INTO idempotency "
-            "(key, tool, args_hash, response_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (key, tool, args_hash, response_json, now),
+            "(tenant_id, key, tool, args_hash, response_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (tenant, key, tool, args_hash, response_json, now),
         )
 
 
