@@ -493,3 +493,79 @@ def test_main_missing_data_dir_returns_1(tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "does not exist" in err
+
+
+# ============================================================
+# Bulk INSERT regression — confirms executemany is actually being used
+# ============================================================
+
+def test_audit_log_bulk_inserts_uses_executemany(sqlite_db, data_dir, monkeypatch):
+    """Regression: audit_log + kpi_history must use `executemany`
+    (one round trip per batch) instead of N individual INSERTs.
+
+    We count `executemany` calls on the `_Cursor` shim itself; with
+    1500 rows + batch size 1000, expect 2 bulk inserts."""
+    monkeypatch.setattr(M, "_BULK_BATCH_SIZE", 1000)
+
+    rows = [
+        {"ts": f"2026-01-01T00:00:0{i % 10}+00:00", "actor": "a",
+         "action": "x", "tool": "t", "args_summary": {},
+         "result_summary": "ok", "correlation_id": f"c{i}"}
+        for i in range(1500)
+    ]
+    (data_dir / "audit.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    counts = {"executemany": 0, "execute": 0}
+    orig_em = M._Cursor.executemany
+    orig_ex = M._Cursor.execute
+
+    def counted_em(self, sql, seq):
+        counts["executemany"] += 1
+        return orig_em(self, sql, seq)
+
+    def counted_ex(self, sql, params=()):
+        counts["execute"] += 1
+        return orig_ex(self, sql, params)
+
+    monkeypatch.setattr(M._Cursor, "executemany", counted_em)
+    monkeypatch.setattr(M._Cursor, "execute", counted_ex)
+
+    reports = M.run_migration(sqlite_db, data_dir, "default",
+                              dry_run=False, allow_duplicates=False)
+    audit = next(r for r in reports if r.target_table == "audit_log")
+    assert audit.inserted == 1500
+    assert counts["executemany"] >= 2, (
+        f"audit_log migration must use executemany; saw "
+        f"{counts['execute']} executes and {counts['executemany']} executemanys"
+    )
+
+
+def test_kpi_history_also_uses_executemany(sqlite_db, data_dir, monkeypatch):
+    """Sibling regression for kpi_history — same bulk-insert path."""
+    monkeypatch.setattr(M, "_BULK_BATCH_SIZE", 100)
+    rows = [
+        {"name": "metric_a", "value": float(i), "ts": "x", "tags": {}}
+        for i in range(250)
+    ]
+    (data_dir / "kpi_history.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    em_count = {"n": 0}
+    orig_em = M._Cursor.executemany
+
+    def counted(self, sql, seq):
+        em_count["n"] += 1
+        return orig_em(self, sql, seq)
+
+    monkeypatch.setattr(M._Cursor, "executemany", counted)
+    reports = M.run_migration(sqlite_db, data_dir, "default",
+                              dry_run=False, allow_duplicates=False)
+    kpi = next(r for r in reports if r.target_table == "kpi_history")
+    assert kpi.inserted == 250
+    # 250 / 100 = 3 batches
+    assert em_count["n"] >= 3

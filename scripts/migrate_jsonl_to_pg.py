@@ -203,17 +203,23 @@ def migrate_audit_log(conn, dialect: str, data_dir: Path, tenant_id: str,
             report.skipped = len(rows)
             return report
 
-    for rec in rows:
-        conn.execute(
-            f"INSERT INTO audit_log (ts, tenant_id, actor_sub, tool, action, "
-            f" args_json, result_summary, correlation_id) "
-            f"VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})",
-            (rec.get("ts"), tenant_id, rec.get("actor"),
-             rec.get("tool") or "", rec.get("action") or "",
-             json.dumps(rec.get("args_summary") or {}, ensure_ascii=False),
-             rec.get("result_summary"), rec.get("correlation_id")),
-        )
-        report.inserted += 1
+    # Build the parameter list once, then bulk-insert in batches via
+    # executemany — one round trip per batch instead of one per row.
+    sql = (
+        f"INSERT INTO audit_log (ts, tenant_id, actor_sub, tool, action, "
+        f" args_json, result_summary, correlation_id) "
+        f"VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})"
+    )
+    params = [
+        (rec.get("ts"), tenant_id, rec.get("actor"),
+         rec.get("tool") or "", rec.get("action") or "",
+         json.dumps(rec.get("args_summary") or {}, ensure_ascii=False),
+         rec.get("result_summary"), rec.get("correlation_id"))
+        for rec in rows
+    ]
+    for i in range(0, len(params), _BULK_BATCH_SIZE):
+        conn.executemany(sql, params[i:i + _BULK_BATCH_SIZE])
+    report.inserted = len(params)
     return report
 
 
@@ -241,18 +247,23 @@ def migrate_kpi_history(conn, dialect: str, data_dir: Path, tenant_id: str,
             report.skipped = len(rows)
             return report
 
+    sql = (
+        f"INSERT INTO kpi_history (tenant_id, name, value, ts, tags_json) "
+        f"VALUES ({p}, {p}, {p}, {p}, {p})"
+    )
+    params: list[tuple] = []
     for rec in rows:
         if rec.get("value") is None or not rec.get("name"):
             report.errors.append(f"kpi row missing name/value: {str(rec)[:120]}")
             continue
-        conn.execute(
-            f"INSERT INTO kpi_history (tenant_id, name, value, ts, tags_json) "
-            f"VALUES ({p}, {p}, {p}, {p}, {p})",
-            (tenant_id, rec["name"], float(rec["value"]),
-             rec.get("ts"),
-             json.dumps(rec.get("tags") or {}, ensure_ascii=False)),
-        )
-        report.inserted += 1
+        params.append((
+            tenant_id, rec["name"], float(rec["value"]),
+            rec.get("ts"),
+            json.dumps(rec.get("tags") or {}, ensure_ascii=False),
+        ))
+    for i in range(0, len(params), _BULK_BATCH_SIZE):
+        conn.executemany(sql, params[i:i + _BULK_BATCH_SIZE])
+    report.inserted = len(params)
     return report
 
 
@@ -382,24 +393,51 @@ class _Cursor:
     """Tiny shim: both sqlite3.Connection.execute and psycopg2 cursors
     expose `.execute(sql, params).fetchone()/.fetchall()`, but psycopg2
     requires a cursor object first. Normalize so the migrator code is
-    identical for both backends."""
+    identical for both backends.
+
+    Holds ONE long-lived psycopg2 cursor instead of creating a fresh
+    one per execute() — earlier per-row cursor allocation was a
+    measurable slowdown on remote PG with high RTT.
+    """
     def __init__(self, conn):
         self._conn = conn
+        # psycopg2 connections have .cursor() but NOT .execute() on the
+        # connection itself; sqlite3.Connection.execute() works directly.
         self._is_psycopg = hasattr(conn, "cursor") and not hasattr(conn, "executemany")
+        # One persistent cursor for psycopg2; None for sqlite (it has
+        # per-execute internal cursors anyway).
+        self._cur = conn.cursor() if self._is_psycopg else None
+        self._last_result = None  # holds sqlite3.Cursor for fetch* after execute
 
     def execute(self, sql: str, params: tuple = ()) -> "_Cursor":
         if self._is_psycopg:
-            self._cur = self._conn.cursor()
             self._cur.execute(sql, params)
-            return self
-        self._cur = self._conn.execute(sql, params)
+        else:
+            self._last_result = self._conn.execute(sql, params)
+        return self
+
+    def executemany(self, sql: str, seq: list) -> "_Cursor":
+        """Bulk insert. Both backends accept the standard DB-API
+        `executemany(sql, [(p1,p2,...), ...])` signature. For Postgres
+        this is dramatically faster than a per-row loop (one round trip
+        vs N); for sqlite it's still a meaningful speedup."""
+        if self._is_psycopg:
+            self._cur.executemany(sql, seq)
+        else:
+            self._last_result = self._conn.executemany(sql, seq)
         return self
 
     def fetchone(self):
-        return self._cur.fetchone()
+        return self._cur.fetchone() if self._is_psycopg else self._last_result.fetchone()
 
     def fetchall(self):
-        return self._cur.fetchall()
+        return self._cur.fetchall() if self._is_psycopg else self._last_result.fetchall()
+
+
+# Batch size for executemany() — small enough to avoid blowing past
+# Postgres's max_locks_per_transaction or psycopg2's parameter cap
+# (~32767), large enough to amortize the round trip. 1000 covers both.
+_BULK_BATCH_SIZE = 1000
 
 
 def _print_report(reports: list[MigrationReport], dry_run: bool) -> bool:
