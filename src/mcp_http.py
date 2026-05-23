@@ -28,6 +28,45 @@ from fastapi.responses import JSONResponse, Response
 logger = logging.getLogger(__name__)
 
 
+def _authenticate(request: Request) -> tuple[dict | None, JSONResponse | None]:
+    """Resolve the bearer token to a claims dict, or return a 401 response.
+
+    Returns (user_claims, None) on success, (None, error_response) on
+    failure, or ({}, None) when auth is disabled (DEV).
+
+    Refuses tokens that came back with `unsafe_no_verify=True` unless
+    the operator explicitly opted in via `ALLOW_UNSAFE_OIDC=1`. Without
+    this guard, a missing `python-jose` install would silently accept
+    arbitrary JWTs.
+    """
+    if os.environ.get("ENABLE_MCP_HTTP_NOAUTH") == "1":
+        return {}, None
+    from src.auth_oidc import verify_token
+    authz = request.headers.get("authorization", "")
+    if not authz.lower().startswith("bearer "):
+        return None, JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32001, "message": "missing Bearer token"}},
+            status_code=401,
+        )
+    # `split(None, 1)` collapses whitespace; if the caller sent literally
+    # "Bearer " (no token) the index lookup would raise IndexError and
+    # FastAPI would 500. Per RFC 6750 we MUST return 401.
+    parts = authz.split(None, 1)
+    token = parts[1] if len(parts) > 1 else ""
+    check = verify_token(token)
+    if not check.get("ok"):
+        return None, JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32001, "message": check.get("error", "invalid token")}},
+            status_code=401,
+        )
+    if check.get("unsafe_no_verify") and os.environ.get("ALLOW_UNSAFE_OIDC") != "1":
+        return None, JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32001, "message": "OIDC verification unavailable (install python-jose) — refusing token. Set ALLOW_UNSAFE_OIDC=1 to bypass (DEV-ONLY)."}},
+            status_code=401,
+        )
+    return check.get("claims") or {}, None
+
+
 def mount_mcp_http(app, *, path: str = "/mcp") -> None:
     """Attach MCP Streamable HTTP endpoint to a FastAPI app.
 
@@ -45,27 +84,46 @@ def mount_mcp_http(app, *, path: str = "/mcp") -> None:
         logger.info("MCP HTTP disabled (set ENABLE_MCP_HTTP=1 to enable)")
         return
 
+    # Hard refusal: ENABLE_MCP_HTTP_NOAUTH=1 disables both Bearer + RBAC.
+    # If the operator ALSO claims to be running in prod, this is almost
+    # certainly a misconfiguration and would expose every tool unauthenticated.
+    # We refuse to mount rather than silently exposing the surface.
+    if os.environ.get("ENABLE_MCP_HTTP_NOAUTH") == "1":
+        app_env = (os.environ.get("APP_ENV") or os.environ.get("ENV") or "").lower()
+        if app_env in {"prod", "production"}:
+            raise RuntimeError(
+                "REFUSING to mount MCP HTTP: ENABLE_MCP_HTTP_NOAUTH=1 with "
+                f"APP_ENV/ENV={app_env!r}. The noauth flag bypasses OIDC and "
+                "RBAC for every request — never enable it in production. "
+                "Unset one of the two env vars to proceed."
+            )
+        logger.warning(
+            "MCP HTTP mounting WITHOUT authentication (ENABLE_MCP_HTTP_NOAUTH=1). "
+            "All RBAC checks will be skipped. DEV-ONLY."
+        )
+
+    # Pre-wrap every tool ONCE at mount time so POST /mcp doesn't rebuild
+    # the @tool closure (with idempotency / dry_run / OTel / quota /
+    # truncation middleware) on every request. The wrapped handler is
+    # identical to the one the in-process MCP server uses.
+    from src.tools.registry import TOOLS, _wrap_for_sdk
+    _HANDLERS: dict[str, Any] = {}
+    _SPECS: dict[str, dict] = {}
+    for _spec in TOOLS:
+        _wrapped = _wrap_for_sdk(_spec)
+        _HANDLERS[_spec["name"]] = getattr(_wrapped, "handler", _wrapped)
+        _SPECS[_spec["name"]] = _spec
+
     @app.get(path)
     async def mcp_list_tools(request: Request) -> Response:
         """MCP discovery: GET /mcp returns the tool list as JSON-RPC."""
         from src.tools.registry import TOOLS
 
-        # Optional auth — same Bearer/JWT contract as the rest of the app.
-        if os.environ.get("ENABLE_MCP_HTTP_NOAUTH") != "1":
-            from src.auth_oidc import verify_token
-            authz = request.headers.get("authorization", "")
-            if not authz.lower().startswith("bearer "):
-                return JSONResponse(
-                    {"error": "missing Bearer token"},
-                    status_code=401,
-                )
-            check = verify_token(authz.split(None, 1)[1])
-            if not check.get("ok"):
-                return JSONResponse(
-                    {"error": check.get("error", "invalid token")},
-                    status_code=401,
-                )
-            request.state.user = check.get("claims")
+        user, err = _authenticate(request)
+        if err is not None:
+            return err
+        if user:
+            request.state.user = user
 
         tool_list = [
             {
@@ -101,19 +159,11 @@ def mount_mcp_http(app, *, path: str = "/mcp") -> None:
         success envelope. Per-tool annotations + idempotency + dry_run +
         truncation still apply (we route through the SAME wrapper the
         in-process MCP server uses)."""
-        # Optional auth — same gate as discovery
-        if os.environ.get("ENABLE_MCP_HTTP_NOAUTH") != "1":
-            from src.auth_oidc import verify_token
-            authz = request.headers.get("authorization", "")
-            if not authz.lower().startswith("bearer "):
-                return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32001, "message": "missing Bearer token"}}, status_code=401)
-            check = verify_token(authz.split(None, 1)[1])
-            if not check.get("ok"):
-                return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32001, "message": check.get("error")}}, status_code=401)
-            user = check.get("claims") or {}
+        user, err = _authenticate(request)
+        if err is not None:
+            return err
+        if user:
             request.state.user = user
-        else:
-            user = {}
 
         try:
             envelope = await request.json()
@@ -135,11 +185,9 @@ def mount_mcp_http(app, *, path: str = "/mcp") -> None:
         bare_name = tool_name.split("__")[-1] if "__" in tool_name else tool_name
         arguments = params.get("arguments", {}) or {}
 
-        # Optional RBAC gate — only when a user is bound and a tool has
-        # a known policy_op.
-        from src.tools.registry import TOOLS
-        spec = next((t for t in TOOLS if t["name"] == bare_name), None)
-        if spec is None:
+        spec = _SPECS.get(bare_name)
+        handler = _HANDLERS.get(bare_name)
+        if spec is None or handler is None:
             return JSONResponse({
                 "jsonrpc": "2.0", "id": req_id,
                 "error": {"code": -32601, "message": f"tool {bare_name!r} not found"},
@@ -154,11 +202,6 @@ def mount_mcp_http(app, *, path: str = "/mcp") -> None:
                     "error": {"code": -32002, "message": f"forbidden by RBAC: {allowed['reason']}"},
                 }, status_code=403)
 
-        # Invoke via the same wrapper the in-process MCP server uses, so
-        # idempotency / dry_run / truncation / problem-envelope all apply.
-        from src.tools.registry import _wrap_for_sdk
-        wrapped = _wrap_for_sdk(spec)
-        handler = getattr(wrapped, "handler", wrapped)
         try:
             tool_result = await handler(arguments)
         except Exception as e:

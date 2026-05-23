@@ -8,11 +8,22 @@ def _str_url(req):
     return req if isinstance(req, str) else req.full_url
 
 
+@pytest.fixture
+def isolated_vendor_tokens(tmp_path, monkeypatch):
+    """`avito_auth` caches via `_vendor_helpers.get_cached_oauth_token`
+    which writes to `.data/vendor_tokens/`. Without isolation, a token
+    cached by a previous test run makes the next call skip urlopen and
+    these mock-based tests fail. Redirect to a tmp dir per test."""
+    from src.tools import _vendor_helpers
+    monkeypatch.setattr(_vendor_helpers, "_TOKENS_DIR", tmp_path)
+    return tmp_path
+
+
 # ============================================================
 # Avito
 # ============================================================
 
-def test_avito_auth_posts_client_credentials():
+def test_avito_auth_posts_client_credentials(isolated_vendor_tokens):
     from src.tools import social
     captured = {}
 
@@ -34,7 +45,7 @@ def test_avito_auth_posts_client_credentials():
     assert out["ok"] is True
 
 
-def test_avito_auth_handles_401():
+def test_avito_auth_handles_401(isolated_vendor_tokens):
     from src.tools import social
     from urllib.error import HTTPError
     fake = MagicMock()
@@ -44,6 +55,28 @@ def test_avito_auth_handles_401():
         out = social.avito_auth("bad", "creds")
     assert out["ok"] is False
     assert out["_meta"]["http_status"] == 401
+
+
+def test_avito_auth_cache_keyed_on_secret(isolated_vendor_tokens):
+    """SEC M2 regression: cache key must depend on client_secret so a
+    caller with a wrong secret can't reuse a cached token."""
+    from src.tools import social
+    calls: list[bytes] = []
+
+    def fake_urlopen(req, timeout):
+        calls.append(req.data)
+        m = MagicMock()
+        m.read.return_value = b'{"access_token":"T1","expires_in":86400}'
+        m.status = 200
+        m.__enter__ = lambda s: s
+        m.__exit__ = lambda s, *a: None
+        return m
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        social.avito_auth("clid", "secretA")  # populates cache for (clid,secretA)
+        social.avito_auth("clid", "secretA")  # cache hit — no second urlopen
+        social.avito_auth("clid", "secretB")  # different secret → cache MISS
+    assert len(calls) == 2  # not 1 (cache poisoning) and not 3 (no cache)
 
 
 def test_avito_self_info_bearer_header():

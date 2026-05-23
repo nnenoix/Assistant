@@ -42,8 +42,9 @@ def _post_json(url: str, body: dict, headers: dict | None = None, timeout: int =
 _AVITO_BASE = "https://api.avito.ru"
 
 
-def avito_auth(client_id: str, client_secret: str) -> dict:
-    """OAuth2 client_credentials → access_token (lifetime ~24h)."""
+def _avito_auth_uncached(client_id: str, client_secret: str) -> dict:
+    """One-shot OAuth fetch — bypass the cache. Used by `avito_auth` and on
+    forced refresh after a 401."""
     body = urllib.parse.urlencode({
         "client_id": client_id, "client_secret": client_secret,
         "grant_type": "client_credentials",
@@ -60,6 +61,25 @@ def avito_auth(client_id: str, client_secret: str) -> dict:
     except urllib.error.HTTPError as e:
         return {"ok": False, "error": e.read()[:300].decode("utf-8", errors="replace"),
                 "_meta": {"http_status": e.code}}
+
+
+def avito_auth(client_id: str, client_secret: str) -> dict:
+    """OAuth2 client_credentials → access_token (lifetime ~24h).
+
+    Token is cached via `_vendor_helpers.get_cached_oauth_token`. The
+    cache key is `sha256(client_id||client_secret)` — NOT `client_id`
+    alone — so a caller that knows the public client_id but a wrong
+    client_secret can't ride a cached token: they'd still have to
+    present matching credentials to populate (or hit) the cache."""
+    import hashlib
+    from src.tools._vendor_helpers import get_cached_oauth_token
+    account_key = hashlib.sha256(
+        f"{client_id}::{client_secret}".encode("utf-8")
+    ).hexdigest()[:24]
+    return get_cached_oauth_token(
+        "avito", account_key,
+        lambda: _avito_auth_uncached(client_id, client_secret),
+    )
 
 
 def avito_self_info(token: str) -> dict:

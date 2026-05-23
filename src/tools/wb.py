@@ -63,32 +63,40 @@ def _request(host: str, path: str, token: str, params: dict | None = None,
 def check_token(token: str) -> dict:
     """Ping every WB API family with `token`. Returns {family: status}.
     A working token should return Status='OK' for the families it has access to.
+
+    Pings run in parallel — 6 hosts × ~300 ms each in serial is ~1.8 s and
+    blocks the agent on every health check. A ThreadPoolExecutor drops
+    that to roughly one round-trip.
     """
+    from concurrent.futures import ThreadPoolExecutor
     from src.tools._errors import _classify_exception
 
-    out = {}
-    for name, host in HOSTS.items():
+    def _probe_one(name_host: tuple[str, str]) -> tuple[str, dict]:
+        name, host = name_host
         try:
             code, _hdr, body = _request(host, "/ping", token, timeout=15)
             try:
                 payload = json.loads(body.decode("utf-8"))
-                out[name] = {"code": code, "status": payload.get("Status") or payload.get("status")}
+                return name, {"code": code, "status": payload.get("Status") or payload.get("status")}
             except Exception as parse_e:
                 kind, _ = _classify_exception(parse_e)
-                out[name] = {
+                return name, {
                     "code": code,
                     "raw": body[:120].decode("utf-8", errors="replace"),
                     "parse_error_kind": kind,
                 }
         except Exception as e:
             kind, status = _classify_exception(e)
-            out[name] = {
+            return name, {
                 "error": str(e)[:200],
                 "error_kind": kind,
                 "http_status": status,
                 "exception_type": type(e).__name__,
             }
-    return out
+
+    with ThreadPoolExecutor(max_workers=len(HOSTS)) as pool:
+        results = pool.map(_probe_one, HOSTS.items())
+    return dict(results)
 
 
 def token_age(token: str) -> dict:
