@@ -215,3 +215,168 @@ def test_get_current_version_matches_pyproject():
     v = updater.get_current_version()
     if updater._parse_version(v):
         assert v  # smoke
+
+
+# ============================================================
+# download_update
+# ============================================================
+
+def _ok_stream_response(body: bytes, content_length: int | None = None):
+    """Mock urlopen that returns `body` in chunks."""
+    m = MagicMock()
+    # `read(n)` returns successive chunks
+    chunks = [body[i:i + 8192] for i in range(0, len(body), 8192)] + [b""]
+    m.read.side_effect = chunks
+    m.headers = {"Content-Length": str(content_length)} if content_length else {}
+    m.status = 200
+    m.__enter__ = lambda s: s
+    m.__exit__ = lambda s, *a: None
+    return m
+
+
+def test_download_update_streams_to_target(tmp_path):
+    body = b"FAKE_EXE_BYTES" * 1000  # 14 KB
+    target = tmp_path / "new.exe"
+    with patch("urllib.request.urlopen",
+               return_value=_ok_stream_response(body, content_length=len(body))):
+        out = updater.download_update("https://example.com/agent.exe", str(target))
+    assert out["ok"] is True
+    assert out["data"]["bytes"] == len(body)
+    assert target.exists()
+    assert target.read_bytes() == body
+
+
+def test_download_update_verifies_sha256_on_match(tmp_path):
+    import hashlib
+    body = b"some-binary-blob"
+    expected_sha = hashlib.sha256(body).hexdigest()
+    target = tmp_path / "new.exe"
+    with patch("urllib.request.urlopen",
+               return_value=_ok_stream_response(body)):
+        out = updater.download_update(
+            "https://example.com/agent.exe", str(target),
+            expected_sha256=expected_sha,
+        )
+    assert out["ok"] is True
+    assert out["data"]["sha256"] == expected_sha
+
+
+def test_download_update_rejects_sha256_mismatch(tmp_path):
+    """Critical security path: a tampered/MITM'd binary must be refused
+    BEFORE the .part file gets promoted to the real target."""
+    body = b"tampered-blob"
+    target = tmp_path / "new.exe"
+    with patch("urllib.request.urlopen",
+               return_value=_ok_stream_response(body)):
+        out = updater.download_update(
+            "https://example.com/agent.exe", str(target),
+            expected_sha256="0" * 64,  # bogus
+        )
+    assert out["ok"] is False
+    assert out["error_kind"] == "bad_input"
+    assert "sha256 mismatch" in out["error"]
+    # The final target must NOT exist
+    assert not target.exists()
+    # And the .part should be cleaned up too
+    assert not target.with_suffix(target.suffix + ".part").exists()
+
+
+def test_download_update_progress_callback_invoked(tmp_path):
+    body = b"x" * 100_000  # 100 KB
+    target = tmp_path / "new.exe"
+    progress: list[int] = []
+    with patch("urllib.request.urlopen",
+               return_value=_ok_stream_response(body, content_length=len(body))):
+        out = updater.download_update(
+            "https://example.com/agent.exe", str(target),
+            progress_cb=lambda b, total: progress.append(b),
+        )
+    assert out["ok"] is True
+    assert len(progress) >= 1  # called at least once per chunk
+    # Last progress = total bytes
+    assert progress[-1] == len(body)
+
+
+def test_download_update_progress_cb_exception_is_swallowed(tmp_path):
+    body = b"data"
+    target = tmp_path / "new.exe"
+
+    def boom(*a):
+        raise RuntimeError("ui dead")
+
+    with patch("urllib.request.urlopen",
+               return_value=_ok_stream_response(body)):
+        out = updater.download_update(
+            "https://example.com/agent.exe", str(target), progress_cb=boom,
+        )
+    assert out["ok"] is True  # callback errors don't break download
+
+
+def test_download_update_http_error_cleans_up_partial(tmp_path):
+    target = tmp_path / "new.exe"
+    err = HTTPError("u", 404, "missing", {}, None)
+    with patch("urllib.request.urlopen", side_effect=err):
+        out = updater.download_update("https://example.com/agent.exe", str(target))
+    assert out["ok"] is False
+    assert out["error_kind"] == "not_found"
+    assert not target.with_suffix(target.suffix + ".part").exists()
+
+
+def test_download_update_network_error_returns_network_kind(tmp_path):
+    from urllib.error import URLError
+    target = tmp_path / "new.exe"
+    with patch("urllib.request.urlopen",
+               side_effect=URLError("connection refused")):
+        out = updater.download_update("https://example.com/agent.exe", str(target))
+    assert out["ok"] is False
+    assert out["error_kind"] == "network"
+
+
+# ============================================================
+# apply_update
+# ============================================================
+
+def test_apply_update_swaps_files(tmp_path):
+    current = tmp_path / "agent.exe"
+    new = tmp_path / "agent-new.exe"
+    current.write_bytes(b"OLD")
+    new.write_bytes(b"NEW")
+
+    out = updater.apply_update(str(new), str(current), relaunch=False)
+    assert out["ok"] is True
+    assert current.read_bytes() == b"NEW"
+    backup = Path(out["data"]["backup_path"])
+    assert backup.exists()
+    assert backup.read_bytes() == b"OLD"
+
+
+def test_apply_update_missing_new_binary_is_not_found(tmp_path):
+    current = tmp_path / "agent.exe"
+    current.write_bytes(b"OLD")
+    out = updater.apply_update(str(tmp_path / "nope.exe"), str(current),
+                                relaunch=False)
+    assert out["ok"] is False
+    assert out["error_kind"] == "not_found"
+    # current must not have been touched
+    assert current.read_bytes() == b"OLD"
+
+
+def test_apply_update_cleans_up_stale_backup(tmp_path):
+    """A prior failed update left an `.old` backup; the new apply call
+    must overwrite it cleanly, not error out."""
+    current = tmp_path / "agent.exe"
+    new = tmp_path / "agent-new.exe"
+    current.write_bytes(b"OLD")
+    new.write_bytes(b"NEW")
+    stale_backup = current.with_suffix(current.suffix + ".old")
+    stale_backup.write_bytes(b"PREVIOUS_OLD")  # leftover
+
+    out = updater.apply_update(str(new), str(current), relaunch=False)
+    assert out["ok"] is True
+    # New backup overwrote the stale one (now holds the previous current)
+    new_backup = Path(out["data"]["backup_path"])
+    assert new_backup.read_bytes() == b"OLD"
+
+
+# Import helpers for the new tests
+from pathlib import Path  # noqa: E402

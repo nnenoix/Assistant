@@ -159,6 +159,221 @@ def check_for_updates(current_version: str, manifest_url: str,
     return result
 
 
+def download_update(download_url: str, target_path: str,
+                    chunk_size: int = 64 * 1024,
+                    timeout: int = 300,
+                    expected_sha256: str | None = None,
+                    progress_cb: Any = None) -> dict:
+    """Stream the new build to `target_path`. Returns standard envelope.
+
+    - Streams in `chunk_size`-byte chunks so a 50MB .exe doesn't go
+      RAM-resident.
+    - If `expected_sha256` is provided, verifies the SHA-256 of the
+      downloaded bytes BEFORE writing the final path (we write to
+      `target_path + ".part"` first, then atomically rename). A hash
+      mismatch deletes the partial and returns `error_kind: "bad_input"`
+      so the agent doesn't apply a corrupt / tampered binary.
+    - `progress_cb(bytes_so_far, total_or_None)` is called per chunk if
+      supplied (UI can update a progress bar). Errors in the callback
+      are silently swallowed — never break the download.
+
+    Returns:
+        ok:   {ok: True, data: {bytes, sha256, path}, _meta}
+        fail: {ok: False, error, error_kind, _meta}
+    """
+    import hashlib
+    from pathlib import Path
+
+    target = Path(target_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_suffix(target.suffix + ".part")
+
+    try:
+        req = urllib.request.Request(
+            download_url,
+            headers={"Accept": "application/octet-stream"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total = resp.headers.get("Content-Length")
+            total_int = int(total) if total and total.isdigit() else None
+            h = hashlib.sha256()
+            bytes_so_far = 0
+            with open(part, "wb") as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    h.update(chunk)
+                    bytes_so_far += len(chunk)
+                    if progress_cb is not None:
+                        try:
+                            progress_cb(bytes_so_far, total_int)
+                        except Exception:
+                            pass
+            actual_sha = h.hexdigest()
+    except urllib.error.HTTPError as e:
+        if part.exists():
+            part.unlink()
+        return {
+            "ok": False,
+            "error": f"HTTP {e.code}: {str(e)[:200]}",
+            "error_kind": _classify_http_error(e.code, str(e)),
+            "_meta": {"http_status": e.code, "download_url": download_url},
+        }
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        if part.exists():
+            try:
+                part.unlink()
+            except Exception:
+                pass
+        kind, _ = _classify_exception(e)
+        return {
+            "ok": False,
+            "error": f"network: {type(e).__name__}: {str(e)[:200]}",
+            "error_kind": kind,
+            "_meta": {"http_status": None, "download_url": download_url},
+        }
+
+    if expected_sha256 and actual_sha.lower() != expected_sha256.lower():
+        # Refuse to atomically promote a hash-mismatched download —
+        # this is the supply-chain attack surface (MITM swapped the
+        # binary). Delete the partial; caller decides whether to retry.
+        if part.exists():
+            part.unlink()
+        return {
+            "ok": False,
+            "error": (f"sha256 mismatch: expected {expected_sha256}, "
+                      f"got {actual_sha}"),
+            "error_kind": "bad_input",
+            "_meta": {"download_url": download_url,
+                      "actual_sha256": actual_sha,
+                      "expected_sha256": expected_sha256},
+        }
+
+    # Atomically move into place
+    if target.exists():
+        target.unlink()
+    part.rename(target)
+    return {
+        "ok": True,
+        "data": {
+            "bytes": bytes_so_far,
+            "sha256": actual_sha,
+            "path": str(target.resolve()),
+        },
+        "_meta": {"download_url": download_url},
+    }
+
+
+def apply_update(new_exe_path: str, current_exe_path: str | None = None,
+                 relaunch: bool = True) -> dict:
+    """Swap the running .exe with the freshly downloaded one + optionally
+    relaunch the app.
+
+    Strategy (Windows-aware): a running .exe can't replace itself, but
+    it CAN be renamed while running. So:
+        1. Rename current → current + ".old"
+        2. Rename new     → current
+        3. Optionally `os.startfile(current)` to launch the fresh build
+        4. The user's existing process exits when its main loop quits
+           (or via `sys.exit(0)` if `relaunch=True`)
+
+    On non-Windows (Linux/macOS), an .exe rename still works the same —
+    a Python script / binary can be renamed while executing. The "rename
+    while running" trick is OS-agnostic; only the launch step differs.
+
+    Returns standard envelope; never raises (the caller is mid-update
+    and a clean error message matters more than a clean traceback).
+
+    Caller is responsible for explicit `sys.exit(0)` AFTER this returns
+    `{ok: True}` if they want the old process to die immediately. We
+    don't call exit ourselves so tests can drive this in-process.
+    """
+    import os
+    import shutil
+    import sys
+    from pathlib import Path
+
+    new_path = Path(new_exe_path)
+    if not new_path.exists():
+        return {
+            "ok": False,
+            "error": f"new executable not found: {new_exe_path}",
+            "error_kind": "not_found",
+        }
+
+    if current_exe_path is None:
+        # Default: replace the binary that's running this Python.
+        # For a frozen build (PyInstaller .exe), this is the .exe path.
+        # For `uv run` from source, this is the python interpreter —
+        # caller should pass an explicit `current_exe_path` instead.
+        current_exe_path = sys.executable
+    current = Path(current_exe_path)
+
+    backup = current.with_suffix(current.suffix + ".old")
+    try:
+        # Clean up any leftover from a previous update attempt
+        if backup.exists():
+            try:
+                backup.unlink()
+            except Exception:
+                pass
+        # Step 1: move current → .old (allowed even while running on Windows)
+        shutil.move(str(current), str(backup))
+        # Step 2: move new → current
+        shutil.move(str(new_path), str(current))
+    except OSError as e:
+        # Best-effort rollback
+        if backup.exists() and not current.exists():
+            try:
+                shutil.move(str(backup), str(current))
+            except Exception:
+                pass
+        return {
+            "ok": False,
+            "error": f"swap failed: {type(e).__name__}: {str(e)[:200]}",
+            "error_kind": "server",
+            "_meta": {"current_path": str(current), "backup_path": str(backup)},
+        }
+
+    if relaunch:
+        # Launch the new binary in a detached process so we can exit
+        # cleanly. Caller controls the actual exit via sys.exit.
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(current))  # detached by default on Windows
+            else:
+                # POSIX: fork+exec via subprocess so the child outlives us
+                import subprocess
+                subprocess.Popen(
+                    [str(current)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+        except Exception as e:
+            return {
+                "ok": True,
+                "data": {
+                    "applied": True,
+                    "backup_path": str(backup),
+                    "relaunch_failed": f"{type(e).__name__}: {e}",
+                },
+            }
+    return {
+        "ok": True,
+        "data": {
+            "applied": True,
+            "backup_path": str(backup),
+            "current_path": str(current),
+            "relaunched": relaunch,
+        },
+    }
+
+
 def get_current_version() -> str:
     """Return the running build's version string. Tries
     `importlib.metadata.version` first (works for installed packages
