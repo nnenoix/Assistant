@@ -97,7 +97,13 @@ def make_token() -> str:
 
 
 def write_result_file(token: str, full_data: Any) -> Path:
-    """Spill full per-item data to .data/bulk/<token>.json. Returns path."""
+    """Spill full per-item data to .data/bulk/<token>.json. Returns path.
+
+    Tokens are validated symmetrically with `load_result_file`. Today the
+    only callers pass `make_token()` output, but a future caller passing
+    `../../etc/secrets` would otherwise escape BULK_DIR — guard here too."""
+    if not _safe_token(token):
+        raise ValueError(f"invalid token format: {token!r}")
     path = BULK_DIR / f"{token}.json"
     path.write_text(
         json.dumps(full_data, ensure_ascii=False, default=str),

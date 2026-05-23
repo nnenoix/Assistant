@@ -202,3 +202,23 @@ def test_compact_duration_ms_when_started_at_given():
     result = bp.compact([{"id": "a", "value": 1}], op="sum", started_at=t0)
     assert result["_meta"]["duration_ms"] is not None
     assert result["_meta"]["duration_ms"] >= 5.0
+
+
+# ---------- SEC sweep: symmetric token validation ----------
+
+@pytest.mark.parametrize("evil", [
+    "../escape", "..\\escape", "/abs/path",
+    "no_bulk_prefix", "", "bulk_../sneaky",
+])
+def test_write_result_file_rejects_unsafe_token(evil):
+    """write_result_file must validate the token symmetrically with load —
+    otherwise a malicious caller could spill JSON outside BULK_DIR."""
+    with pytest.raises(ValueError, match="invalid token format"):
+        bp.write_result_file(evil, {"x": 1})
+
+
+def test_write_result_file_accepts_well_formed_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(bp, "BULK_DIR", tmp_path)
+    tok = bp.make_token()
+    bp.write_result_file(tok, {"x": 1})
+    assert (tmp_path / f"{tok}.json").exists()

@@ -7,6 +7,7 @@ account+vendor so multiple sellers/accounts can coexist.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -19,6 +20,15 @@ from src.config import DATA_DIR
 
 _TOKENS_DIR = DATA_DIR / "vendor_tokens"
 _TOKENS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Cache filenames concat `vendor` + `account_key` — both go straight into
+# the path. Whitelist to safe characters so a future caller passing
+# `vendor="../etc"` or `account_key="passwd"` can't escape the dir.
+_SAFE_CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+
+def _safe_cache_key(vendor: str, account_key: str) -> bool:
+    return bool(_SAFE_CACHE_KEY_RE.match(vendor) and _SAFE_CACHE_KEY_RE.match(account_key))
 
 
 # ============================================================
@@ -34,7 +44,14 @@ def get_cached_oauth_token(vendor: str, account_key: str,
     vendor `*_auth` functions.
 
     Stored at `.data/vendor_tokens/<vendor>__<account_key>.json` with
-    `{access_token, fetched_at, expires_at}`."""
+    `{access_token, fetched_at, expires_at}`. `vendor` and `account_key`
+    are validated against `[A-Za-z0-9_-]{1,64}` so neither can carry a
+    path-traversal payload into the on-disk filename."""
+    if not _safe_cache_key(vendor, account_key):
+        # Bypass the cache entirely on a malformed key — fetch fresh and
+        # return that to the caller without persisting. Failing closed is
+        # safer than failing the auth call.
+        return fetch_fn()
     path = _TOKENS_DIR / f"{vendor}__{account_key}.json"
     now = time.time()
     if path.exists():
@@ -63,6 +80,9 @@ def get_cached_oauth_token(vendor: str, account_key: str,
 
 def invalidate_oauth_cache(vendor: str, account_key: str) -> dict:
     """Drop a cached token (e.g. when the vendor returns 401 unexpectedly)."""
+    if not _safe_cache_key(vendor, account_key):
+        return {"ok": False, "error_kind": "bad_input",
+                "error": f"invalid cache key {vendor!r}/{account_key!r}"}
     path = _TOKENS_DIR / f"{vendor}__{account_key}.json"
     if path.exists():
         path.unlink()

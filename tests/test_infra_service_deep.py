@@ -576,3 +576,63 @@ def test_report_render_csv_returns_row_count(tmp_path):
     from src.tools import service
     out = service.report_render_csv(["x"], [[1], [2], [3]], str(tmp_path / "r.csv"))
     assert out["data"]["row_count"] == 3
+
+
+# ============================================================
+# Security: MDM table-name path traversal
+# ============================================================
+
+@pytest.mark.parametrize("evil", [
+    "../../escape",
+    "..\\..\\escape",
+    "/abs/path",
+    "C:\\windows\\system32",
+    "name/with/slash",
+    "name.with.dot",
+    "name with space",
+    "",
+    ".",
+    "..",
+    "x" * 100,  # over length cap
+    "null\x00byte",
+    "a$b",
+])
+def test_mdm_table_get_rejects_unsafe_names(isolated_mdm, evil):
+    out = isolated_mdm.mdm_table_get(evil)
+    assert out["ok"] is False
+    assert out["error_kind"] == "bad_input"
+
+
+def test_mdm_upsert_rejects_unsafe_table(isolated_mdm):
+    out = isolated_mdm.mdm_record_upsert("../etc", "id1", {"a": 1})
+    assert out["ok"] is False and out["error_kind"] == "bad_input"
+
+
+def test_mdm_upsert_dry_run_rejects_unsafe_table(isolated_mdm):
+    out = isolated_mdm.mdm_record_upsert("../etc", "id1", {"a": 1}, dry_run=True)
+    assert out["ok"] is False and out["error_kind"] == "bad_input"
+
+
+def test_mdm_resolve_rejects_unsafe_table(isolated_mdm):
+    out = isolated_mdm.mdm_resolve("../etc", "wb_nm", "X")
+    assert out["ok"] is False and out["error_kind"] == "bad_input"
+
+
+def test_mdm_delete_rejects_unsafe_table(isolated_mdm):
+    out = isolated_mdm.mdm_delete("../etc", "id1")
+    assert out["ok"] is False and out["error_kind"] == "bad_input"
+
+
+def test_mdm_accepts_safe_identifiers(isolated_mdm):
+    # These should all be accepted (positive control for the regex).
+    for name in ["products", "Suppliers", "table_1", "kebab-case", "X9"]:
+        out = isolated_mdm.mdm_table_get(name)
+        assert out["ok"] is True, f"safe name {name!r} unexpectedly rejected"
+
+
+def test_mdm_unsafe_name_does_not_write_outside_dir(isolated_mdm, tmp_path):
+    """Confirm no file gets created outside _MDM_DIR even on a path-
+    traversal attempt — belt-and-braces in case the regex were ever relaxed."""
+    isolated_mdm.mdm_record_upsert("../escape", "id1", {"x": 1})
+    # Nothing should have been written above tmp_path (where _MDM_DIR points).
+    assert not (tmp_path.parent / "escape.json").exists()
