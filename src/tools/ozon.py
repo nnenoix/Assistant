@@ -16,9 +16,9 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import urllib.request
-import urllib.error
 import urllib.parse
+
+from src.tools._vendor_http import request_raw
 
 
 _BASE = "https://api-seller.ozon.ru"
@@ -27,25 +27,24 @@ _BASE = "https://api-seller.ozon.ru"
 def _request(path: str, client_id: str, api_key: str,
              body: dict | None = None, method: str = "POST",
              timeout: int = 60) -> tuple[int, dict, bytes]:
-    """One HTTP call to Ozon. Returns (status, headers, raw_body)."""
-    url = f"{_BASE}{path}"
+    """One HTTP call to Ozon. Returns (status, headers, raw_body).
+
+    Auth is two-header (Client-Id + Api-Key), POSTs send JSON body.
+    Shares the urllib transport with every other vendor via
+    `_vendor_http.request_raw`; this module only contributes the
+    auth-header shape and JSON body encoding."""
     data = json.dumps(body or {}).encode("utf-8") if method == "POST" else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
+    return request_raw(
+        method, f"{_BASE}{path}",
         headers={
             "Client-Id": str(client_id),
             "Api-Key": api_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
+        body=data,
+        timeout=timeout,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers or {}), e.read()
 
 
 def _json_call(path: str, client_id: str, api_key: str,

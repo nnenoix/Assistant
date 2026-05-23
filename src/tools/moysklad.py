@@ -23,26 +23,23 @@ _BASE = "https://api.moysklad.ru/api/remap/1.2"
 def _request(path: str, token: str, method: str = "GET",
              params: dict | None = None, body: dict | None = None,
              timeout: int = 60) -> tuple[int, dict, bytes]:
+    """One HTTP call to МойСклад via shared `_vendor_http.request_raw`."""
+    from src.tools._vendor_http import request_raw
     url = f"{_BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
+    return request_raw(
+        method, url,
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/json;charset=utf-8",
             "Accept-Encoding": "gzip",
             **({"Content-Type": "application/json"} if body is not None else {}),
         },
+        body=data,
+        timeout=timeout,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers or {}), e.read()
 
 
 def _call(path: str, token: str, **kwargs) -> dict:

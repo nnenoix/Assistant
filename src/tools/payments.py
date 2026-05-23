@@ -25,6 +25,11 @@ def _yk_request(path: str, shop_id: str, secret: str,
                 method: str = "GET", params: dict | None = None,
                 body: dict | None = None, idempotence_key: str | None = None,
                 timeout: int = 60) -> tuple[int, dict, bytes]:
+    """One HTTP call to ЮKassa via shared `_vendor_http.request_raw`.
+
+    Auth is HTTP Basic (shop_id:secret) — vendor-specific layer this
+    module contributes on top of the shared transport."""
+    from src.tools._vendor_http import request_raw
     url = f"{_YK_BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -37,12 +42,7 @@ def _yk_request(path: str, shop_id: str, secret: str,
     }
     if idempotence_key:
         headers["Idempotence-Key"] = idempotence_key
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers or {}), e.read()
+    return request_raw(method, url, headers=headers, body=data, timeout=timeout)
 
 
 def _yk_call(path: str, shop_id: str, secret: str, **kwargs) -> dict:

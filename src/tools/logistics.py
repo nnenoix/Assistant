@@ -29,25 +29,22 @@ _CDEK_AUTH_PATH = "/oauth/token?parameters"
 def _cdek_request(path: str, token: str, method: str = "GET",
                   params: dict | None = None, body: dict | None = None,
                   timeout: int = 60) -> tuple[int, dict, bytes]:
+    """CDEK via shared `_vendor_http.request_raw` (Bearer auth)."""
+    from src.tools._vendor_http import request_raw
     url = f"{_CDEK_BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
+    return request_raw(
+        method, url,
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
             **({"Content-Type": "application/json"} if body is not None else {}),
         },
+        body=data,
+        timeout=timeout,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers or {}), e.read()
 
 
 def _cdek_call(path: str, token: str, **kwargs) -> dict:
@@ -154,32 +151,32 @@ _BOXBERRY_NEW_BASE = "https://api.boxberry.ru/json.php"  # legacy entry; the new
 def _bb_request(method_name: str, token: str, params: dict | None = None,
                 timeout: int = 60) -> dict:
     """Boxberry uses GET with `token` and `method` as URL params. Most
-    return JSON. Errors come back as `[{"err":"..."}]` or `{"error":...}`."""
+    return JSON. Errors come back as `[{"err":"..."}]` or `{"error":...}`
+    even on HTTP 200 — the 200-but-error path lives here, not in the
+    shared transport."""
+    from src.tools._vendor_http import request_raw
     qp = {"token": token, "method": method_name}
     if params:
         qp.update(params)
     url = f"{_BOXBERRY_BASE}/json.php?" + urllib.parse.urlencode(qp)
-    req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            try:
-                data = json.loads(raw.decode("utf-8"))
-            except json.JSONDecodeError as e:
-                return {"ok": False, "error_kind": "bad_input",
-                        "error": f"non-JSON: {e}", "_meta": {"http_status": resp.status}}
-            # Boxberry returns errors as a list with `err`
-            if isinstance(data, list) and data and isinstance(data[0], dict) and "err" in data[0]:
-                return {"ok": False, "error_kind": "bad_input",
-                        "error": data[0]["err"], "data": None,
-                        "_meta": {"http_status": resp.status}}
-            return {"ok": True, "data": data, "_meta": {"http_status": resp.status}}
-    except urllib.error.HTTPError as e:
-        body = e.read()
+    code, _hdr, raw = request_raw("GET", url, headers={"Accept": "application/json"},
+                                  timeout=timeout)
+    if code >= 400:
         return {"ok": False,
-                "error_kind": "permission" if e.code in (401, 403) else "bad_input",
-                "error": body[:300].decode("utf-8", errors="replace"),
-                "_meta": {"http_status": e.code}}
+                "error_kind": "permission" if code in (401, 403) else "bad_input",
+                "error": raw[:300].decode("utf-8", errors="replace"),
+                "_meta": {"http_status": code}}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        return {"ok": False, "error_kind": "bad_input",
+                "error": f"non-JSON: {e}", "_meta": {"http_status": code}}
+    # Boxberry returns errors as a list with `err` even on 200
+    if isinstance(data, list) and data and isinstance(data[0], dict) and "err" in data[0]:
+        return {"ok": False, "error_kind": "bad_input",
+                "error": data[0]["err"], "data": None,
+                "_meta": {"http_status": code}}
+    return {"ok": True, "data": data, "_meta": {"http_status": code}}
 
 
 def boxberry_list_parcels(token: str, from_id: str = "") -> dict:
@@ -224,6 +221,9 @@ _POCHTA_OTPRAVKA_BASE = "https://otpravka-api.pochta.ru/1.0"
 def _pochta_request(base_url: str, path: str, token: str, login_pass_b64: str | None = None,
                     method: str = "POST", body: dict | None = None,
                     params: dict | None = None, timeout: int = 60) -> tuple[int, dict, bytes]:
+    """Pochta Russia OTPRAVKA API via shared transport. Two-header auth
+    (`AccessToken` + optional `X-User-Authorization` for personal accounts)."""
+    from src.tools._vendor_http import request_raw
     url = f"{base_url}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -235,12 +235,7 @@ def _pochta_request(base_url: str, path: str, token: str, login_pass_b64: str | 
     }
     if login_pass_b64:
         headers["X-User-Authorization"] = f"Basic {login_pass_b64}"
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers or {}), e.read()
+    return request_raw(method, url, headers=headers, body=data, timeout=timeout)
 
 
 def _pochta_call(base_url: str, path: str, token: str, login_pass_b64: str | None = None,

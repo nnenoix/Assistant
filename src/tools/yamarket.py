@@ -20,25 +20,22 @@ _BASE = "https://api.partner.market.yandex.ru"
 def _request(path: str, api_key: str,
              params: dict | None = None, body: dict | None = None,
              method: str = "GET", timeout: int = 60) -> tuple[int, dict, bytes]:
+    """One HTTP call to Yandex.Market via shared `_vendor_http.request_raw`."""
+    from src.tools._vendor_http import request_raw
     url = f"{_BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
+    return request_raw(
+        method, url,
         headers={
             "Api-Key": api_key,
             "Accept": "application/json",
             **({"Content-Type": "application/json"} if body is not None else {}),
         },
+        body=data,
+        timeout=timeout,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers or {}), e.read()
 
 
 def _json_call(path: str, api_key: str, params: dict | None = None,

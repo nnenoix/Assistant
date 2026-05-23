@@ -45,6 +45,38 @@ def _classify(code: int, message: str = "") -> str:
     return _classify_http_error(code, message)
 
 
+def request_raw(method: str, url: str, *,
+                headers: dict | None = None,
+                body: bytes | None = None,
+                timeout: int = 60) -> tuple[int, dict, bytes]:
+    """Low-level HTTP transport — returns (status, response_headers, raw_body).
+
+    Use this when the standard `{ok, data, error}` envelope from
+    `get_json` / `post_json` doesn't fit:
+      - vendor needs a custom signature in headers (Tinkoff SHA-256 token)
+      - vendor returns HTTP 200 with `{"errors":[...]}` body (МойСклад)
+      - response body is binary (file download)
+      - caller needs the rate-limit headers + a retry decision
+
+    HTTPError is caught and returned as `(code, headers, body_bytes)` so
+    the caller can decide whether 429 means retry / 403 means re-auth.
+
+    Other exceptions (URLError, TimeoutError, OSError) propagate — they
+    indicate genuine transport failure with no usable response.
+    """
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method=method.upper(),
+        headers=headers or {},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers or {}), e.read()
+
+
 def get_json(url: str, headers: dict | None = None, timeout: int = 60) -> dict:
     """GET `url`, return the standard envelope. Body truncated to 300
     chars on error so a stray multi-MB HTML error page doesn't blow

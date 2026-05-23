@@ -18,17 +18,23 @@ from typing import Any
 
 
 def _http_get_json(url: str, timeout: int = 30) -> dict:
-    """GET → JSON. Returns {ok, data, error?, _meta:{http_status}}."""
+    """GET → JSON. Returns {ok, data, error?, _meta:{http_status}}.
+
+    Tolerates non-JSON 2xx bodies (SMSC.ru sometimes returns plain text
+    or HTML on success when `fmt` isn't set) — the body lands under
+    `data.raw` so the caller can still inspect it."""
+    from src.tools._vendor_http import request_raw
+    code, _hdr, raw = request_raw("GET", url, timeout=timeout)
+    if code >= 400:
+        return {"ok": False, "error": raw[:300].decode("utf-8", errors="replace"),
+                "_meta": {"http_status": code}}
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            raw = resp.read()
-            try:
-                return {"ok": True, "data": json.loads(raw.decode("utf-8")), "_meta": {"http_status": resp.status}}
-            except json.JSONDecodeError:
-                return {"ok": True, "data": {"raw": raw.decode("utf-8", errors="replace")}, "_meta": {"http_status": resp.status}}
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "error": e.read()[:300].decode("utf-8", errors="replace"),
-                "_meta": {"http_status": e.code}}
+        return {"ok": True, "data": json.loads(raw.decode("utf-8")),
+                "_meta": {"http_status": code}}
+    except json.JSONDecodeError:
+        return {"ok": True,
+                "data": {"raw": raw.decode("utf-8", errors="replace")},
+                "_meta": {"http_status": code}}
 
 
 # ============================================================
@@ -122,18 +128,10 @@ _TG_BASE = "https://api.telegram.org/bot"
 
 
 def _tg_post(bot_token: str, method: str, payload: dict, timeout: int = 30) -> dict:
-    url = f"{_TG_BASE}{bot_token}/{method}"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST", headers={
-        "Content-Type": "application/json", "Accept": "application/json",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return {"ok": True, "data": json.loads(resp.read().decode("utf-8")),
-                    "_meta": {"http_status": resp.status}}
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "error": e.read()[:300].decode("utf-8", errors="replace"),
-                "_meta": {"http_status": e.code}}
+    """POST to Telegram Bot API. The bot_token is part of the URL path
+    (NOT a header) so we build the URL here and delegate transport."""
+    from src.tools._vendor_http import post_json
+    return post_json(f"{_TG_BASE}{bot_token}/{method}", payload, timeout=timeout)
 
 
 def tg_send_message(bot_token: str, chat_id: int | str, text: str,

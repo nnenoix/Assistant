@@ -20,24 +20,21 @@ import urllib.request
 def _odata_get(base_url: str, login: str, password: str, path: str,
                query: dict | None = None, timeout: int = 60) -> dict:
     """GET against /odata/standard.odata/<path>. base_url like
-    `https://1c.example.ru/buh3/odata/standard.odata`."""
+    `https://1c.example.ru/buh3/odata/standard.odata`.
+
+    1С OData uses HTTP Basic auth and a mandatory `$format=json` query
+    param. Shares urllib transport via `_vendor_http.get_json`."""
+    from src.tools._vendor_http import get_json
     auth = base64.b64encode(f"{login}:{password}".encode("utf-8")).decode("ascii")
     url = f"{base_url}/{path}"
     qp = {"$format": "json"}
     if query:
         qp.update(query)
     url += "?" + urllib.parse.urlencode(qp)
-    req = urllib.request.Request(url, method="GET", headers={
+    return get_json(url, headers={
         "Authorization": f"Basic {auth}",
         "Accept": "application/json",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return {"ok": True, "data": json.loads(resp.read().decode("utf-8")),
-                    "_meta": {"http_status": resp.status}}
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "error": e.read()[:300].decode("utf-8", errors="replace"),
-                "_meta": {"http_status": e.code}}
+    }, timeout=timeout)
 
 
 def onec_odata_query(base_url: str, login: str, password: str,

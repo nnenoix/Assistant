@@ -37,27 +37,28 @@ HOSTS = {
 def _request(host: str, path: str, token: str, params: dict | None = None,
              method: str = "GET", body: dict | None = None, timeout: int = 60) -> tuple[int, dict, bytes]:
     """One HTTP request to WB. Returns (status_code, response_headers, raw_body).
-    Caller decides whether to parse JSON, retry on 429, etc.
+
+    Caller decides whether to parse JSON, retry on 429, etc. Shares the
+    urllib transport with every other vendor via `_vendor_http.request_raw`;
+    this module only contributes the host-map URL building and the
+    WB-specific Bearer header shape (no `Bearer ` prefix — WB tokens
+    go in `Authorization` directly).
     """
+    from src.tools._vendor_http import request_raw
     url = f"https://{host}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
+    return request_raw(
+        method, url,
         headers={
             "Authorization": token,
             "Accept": "application/json",
             **({"Content-Type": "application/json"} if body is not None else {}),
         },
+        body=data,
+        timeout=timeout,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers or {}), e.read()
 
 
 def check_token(token: str) -> dict:
